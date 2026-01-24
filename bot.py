@@ -1,107 +1,102 @@
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-# ===== CONFIG =====
-BOT_TOKEN = "8548363818:AAGBl61ZfCenlQwKhuAzBFPoTqd1Dy2qHN0"
-ADMIN_ID = 7112312810
+# ======= CONFIG =======
+import os
+TOKEN = os.environ.get("TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID"))
 
-# Users waiting to submit proof
-waiting_for_proof = set()
-
-# ===== /start COMMAND =====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ======= BUTTONS =======
+def main_menu_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📤 SUBMIT PROOF", callback_data="submit_proof")],
-        [InlineKeyboardButton("❌ CANCEL", callback_data="cancel")]
+        [InlineKeyboardButton("Submit Proof", callback_data="submit_proof")],
+        [InlineKeyboardButton("Where Is My Payment", url="http://t.me/Bot_Tasks_Payment_Bot")],
+        [InlineKeyboardButton("Help", callback_data="help_menu")],
+        [InlineKeyboardButton("Support", url="http://t.me/dtxzahid")]
     ]
+    return InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
-        "**WELCOME 👋**\n\n"
-        "**CLICK THE BUTTON BELOW TO SUBMIT YOUR PROOF**",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+def help_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("Payment Kaha Milega", callback_data="payment_info")],
+        [InlineKeyboardButton("Proof Kaise Bheju", url="https://t.me/BotTaskPayment/2424")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-# ===== BUTTON HANDLER =====
+def admin_proof_keyboard(user_id):
+    keyboard = [
+        [InlineKeyboardButton("Accept", callback_data=f"accept|{user_id}"),
+         InlineKeyboardButton("Reject", callback_data=f"reject|{user_id}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def cancel_button():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_proof")]])
+
+# ======= COMMANDS =======
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("**Welcome To The Bot!**", reply_markup=main_menu_keyboard(), parse_mode="MarkdownV2")
+
+# ======= CALLBACK HANDLERS =======
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    user_id = query.from_user.id
+    data = query.data
 
-    if query.data == "submit_proof":
-        waiting_for_proof.add(user_id)
+    if data == "submit_proof":
+        await query.message.reply_text("**Please Send Screenshot Of Proof With Refer Link Visible**", reply_markup=cancel_button(), parse_mode="MarkdownV2")
+
+    elif data == "cancel_proof":
+        await query.message.reply_text("**Proof Submission Cancelled**", reply_markup=main_menu_keyboard(), parse_mode="MarkdownV2")
+
+    elif data == "help_menu":
+        await query.message.reply_text("**Help Menu:**", reply_markup=help_menu_keyboard(), parse_mode="MarkdownV2")
+
+    elif data == "payment_info":
         await query.message.reply_text(
-            "**PLEASE SEND YOUR PROOF NOW 📸**\n\n"
-            "**YOU CAN SEND IMAGE OR TEXT**",
-            parse_mode="Markdown"
+            "**Bhai Proof Submit Kro Aur 5-10 Min Proof Verify Hoti Hai Payment Apka Bot Mai Add Hojayega**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Bot", url="http://t.me/Bot_Tasks_Payment_Bot")]]),
+            parse_mode="MarkdownV2"
         )
 
-    elif query.data == "cancel":
-        waiting_for_proof.discard(user_id)
-        await query.message.reply_text(
-            "**PROCESS CANCELLED ❌**",
-            parse_mode="Markdown"
-        )
+    elif data.startswith("accept|"):
+        user_id = int(data.split("|")[1])
+        await context.bot.send_message(chat_id=user_id, text="**Bro Apka Refer Count Hogya Payment 5-10 Min Ma Bot Mai Aayega**", parse_mode="MarkdownV2")
+        await query.message.edit_text("**Proof Accepted ✅**")
 
-# ===== RECEIVE PROOF =====
-async def receive_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    elif data.startswith("reject|"):
+        user_id = int(data.split("|")[1])
+        await context.bot.send_message(chat_id=user_id, text="**Bro Apka Refer Nahi Aaya Hai So Payment Nahi Milega**", parse_mode="MarkdownV2")
+        await query.message.edit_text("**Proof Rejected ❌**")
 
-    if user_id not in waiting_for_proof:
-        return
+# ======= MESSAGE HANDLER FOR PROOF =======
+async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo or update.message.document:
+        user_id = update.message.from_user.id
+        # Extract refer link from message text
+        refer_link = update.message.caption if update.message.caption else "No Refer Link Provided"
 
-    waiting_for_proof.discard(user_id)
-
-    caption = (
-        "**📥 NEW PROOF RECEIVED**\n\n"
-        "**USER ID:**\n"
-        f"`{user_id}`"
-    )
-
-    # Send proof to admin
-    if update.message.photo:
-        await context.bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=update.message.photo[-1].file_id,
-            caption=caption,
-            parse_mode="Markdown"
-        )
-
-    elif update.message.text:
+        # Send to admin
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=caption + "\n\n**PROOF TEXT:**\n" + update.message.text,
-            parse_mode="Markdown"
+            text=f"`User ID: {user_id}`\n**Refer Link:** {refer_link}",
+            reply_markup=admin_proof_keyboard(user_id),
+            parse_mode="MarkdownV2"
         )
 
-    # Confirm to user
-    await update.message.reply_text(
-        "**✅ YOUR PROOF HAS BEEN SUBMITTED SUCCESSFULLY**",
-        parse_mode="Markdown"
-    )
+        # Confirm to user
+        await update.message.reply_text("**Your Proof Has Been Submitted ✅**", reply_markup=main_menu_keyboard(), parse_mode="MarkdownV2")
+    else:
+        await update.message.reply_text("**Please Send A Screenshot Or Document**", parse_mode="MarkdownV2")
 
-# ===== MAIN =====
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+# ======= MAIN =======
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.ALL, receive_proof))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, proof_handler))
 
-    print("Bot is running 24/7...")
+    print("Bot Is Running 24/7 ...")
     app.run_polling()
-
-if __name__ == "__main__":
-    main()
