@@ -1,208 +1,229 @@
 import os
+import logging
 from telegram import (
     Update,
+    ReplyKeyboardMarkup,
+    InlineKeyboardMarkup,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
 )
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
-    filters
+    filters,
 )
 
-# ========= CONFIG =========
-TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))
+# ========= ENV VARIABLES =========
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+# =================================
 
-# ========= MEMORY DB =========
-users = {}          # user_id: {balance: int}
-proof_state = {}    # user_id: step
-proof_data = {}     # user_id: {photo, link}
+logging.basicConfig(level=logging.INFO)
 
-# ========= KEYBOARDS =========
-def main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Submit Proof", callback_data="submit_proof")],
-        [InlineKeyboardButton("💰 Balance", callback_data="balance")],
-        [InlineKeyboardButton("📍 Where Is My Payment", url="http://t.me/Bot_Tasks_Payment_Bot")],
-        [InlineKeyboardButton("🧑‍💻 Support", url="http://t.me/dtxzahid")]
-    ])
+users = {}
+withdraw_state = {}
 
-def cancel_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-    ])
+# ---------- KEYBOARDS ----------
+MAIN_KB = ReplyKeyboardMarkup(
+    [
+        ["📤 Submit Proof"],
+        ["💰 Balance"],
+        ["❤️‍🔥 Withdraw"],
+        ["🤯 Payment Method"],
+        ["📍 Where Is My Payment", "🆘 Support"],
+    ],
+    resize_keyboard=True,
+)
 
-def preview_kb():
-    return InlineKeyboardMarkup([
+ADMIN_KB = InlineKeyboardMarkup(
+    [
+        [InlineKeyboardButton("➕ Add Balance", callback_data="add_bal")],
+        [InlineKeyboardButton("➖ Remove Balance", callback_data="rem_bal")],
+        [InlineKeyboardButton("👥 Total Users", callback_data="total_users")],
+    ]
+)
+
+METHOD_KB = InlineKeyboardMarkup(
+    [
         [
-            InlineKeyboardButton("✅ Submit", callback_data="final_submit"),
-            InlineKeyboardButton("❌ Cancel", callback_data="cancel")
+            InlineKeyboardButton("VSV", callback_data="method_vsv"),
+            InlineKeyboardButton("FXL", callback_data="method_fxl"),
+            InlineKeyboardButton("UPI", callback_data="method_upi"),
         ]
-    ])
+    ]
+)
 
-def admin_kb(uid):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Accept", callback_data=f"accept_{uid}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{uid}")
-        ]
-    ])
-
-# ========= START =========
+# ---------- START ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    users.setdefault(uid, {"balance": 0})
-
+    users.setdefault(uid, {"balance": 0, "method": None})
     await update.message.reply_text(
-        "✨ **Welcome To Proof Submit Bot** ✨\n\n"
-        "📸 Submit Your Proof\n"
-        "💰 Check Balance\n\n"
-        "⚠️ *Submit Proof On Same ID To Get Payment*",
+        "✨ **Welcome! Bot is Live & Ready** ✨",
+        reply_markup=MAIN_KB,
         parse_mode="Markdown",
-        reply_markup=main_menu()
     )
 
-# ========= BUTTON HANDLER =========
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- BALANCE ----------
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    bal = users.get(uid, {}).get("balance", 0)
+    await update.message.reply_text(
+        f"💰 **Your Balance:** ₹{bal}\n\nUse Withdraw button to cash out 🤑",
+        parse_mode="Markdown",
+    )
+
+# ---------- PAYMENT METHOD ----------
+async def payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤯 **Choose Payment Method**",
+        reply_markup=METHOD_KB,
+        parse_mode="Markdown",
+    )
+
+async def set_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+
     uid = q.from_user.id
-    data = q.data
+    method = q.data.split("_")[1].upper()
+    users.setdefault(uid, {"balance": 0, "method": None})
 
-    users.setdefault(uid, {"balance": 0})
+    context.user_data["await_method"] = method
 
-    # REMOVE STICKY BUTTONS
-    await q.message.edit_reply_markup(None)
+    text = "📨 Send your **UPI ID**" if method == "UPI" else "📞 Send your **Registered Number**"
+    await q.message.reply_text(text, parse_mode="Markdown")
 
-    if data == "submit_proof":
-        proof_state[uid] = "photo"
-        proof_data[uid] = {}
-        await q.message.reply_text(
-            "📸 **Send Screenshot Where Refer Link Is Visible**",
-            parse_mode="Markdown",
-            reply_markup=cancel_kb()
-        )
-
-    elif data == "balance":
-        bal = users[uid]["balance"]
-        await q.message.reply_text(
-            f"💰 **Balance: ₹{bal}**\n\n"
-            "Use Withdraw Button To Withdraw 🤑",
-            parse_mode="Markdown",
-            reply_markup=main_menu()
-        )
-
-    elif data == "cancel":
-        proof_state.pop(uid, None)
-        proof_data.pop(uid, None)
-        await q.message.reply_text(
-            "❌ **Process Cancelled**",
-            parse_mode="Markdown",
-            reply_markup=main_menu()
-        )
-
-    elif data == "final_submit":
-        pdata = proof_data.get(uid)
-        if not pdata:
-            return
-
-        # SEND TO ADMIN
-        await context.bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=pdata["photo"],
-            caption=(
-                f"`{uid}`\n\n"
-                f"🔗 **Refer Link:**\n{pdata['link']}"
-            ),
-            parse_mode="Markdown",
-            reply_markup=admin_kb(uid)
-        )
-
-        proof_state.pop(uid, None)
-        proof_data.pop(uid, None)
-
-        await q.message.reply_text(
-            "✅ **Proof Submitted Successfully**\n"
-            "⏳ Wait For Verification",
-            parse_mode="Markdown",
-            reply_markup=main_menu()
-        )
-
-    elif data.startswith("accept_") or data.startswith("reject_"):
-        if uid != ADMIN_ID:
-            return
-
-        target = int(data.split("_")[1])
-
-        # REMOVE ADMIN BUTTONS
-        await q.message.edit_reply_markup(None)
-
-        if data.startswith("accept_"):
-            users.setdefault(target, {"balance": 0})
-            users[target]["balance"] += 5
-
-            await context.bot.send_message(
-                chat_id=target,
-                text="🎉 **Proof Verified Successfully**\n"
-                     "💰 Payment Will Be Added In 5–10 Minutes",
-                parse_mode="Markdown"
-            )
-
-            await q.message.reply_text("✅ **Marked As Verified**", parse_mode="Markdown")
-
-        else:
-            await context.bot.send_message(
-                chat_id=target,
-                text="❌ **Proof Rejected**\n"
-                     "Refer Not Found So Payment Not Given",
-                parse_mode="Markdown"
-            )
-
-            await q.message.reply_text("❌ **Marked As Fake**", parse_mode="Markdown")
-
-# ========= MESSAGE HANDLER =========
-async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-
-    if uid not in proof_state:
+async def save_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "await_method" not in context.user_data:
         return
 
-    step = proof_state[uid]
+    uid = update.effective_user.id
+    method = context.user_data.pop("await_method")
+    users[uid]["method"] = f"{method}: {update.message.text}"
 
-    if step == "photo" and update.message.photo:
-        proof_data[uid]["photo"] = update.message.photo[-1].file_id
-        proof_state[uid] = "link"
+    await update.message.reply_text("✅ **Payment Method Saved**", parse_mode="Markdown")
 
-        await update.message.reply_text(
-            "🔗 **Now Send Your Refer Link**",
-            parse_mode="Markdown",
-            reply_markup=cancel_kb()
-        )
+# ---------- WITHDRAW ----------
+async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user = users.get(uid)
 
-    elif step == "link" and update.message.text:
-        proof_data[uid]["link"] = update.message.text
+    if not user or not user.get("method"):
+        await update.message.reply_text("❌ Set payment method first")
+        return
 
-        await update.message.reply_photo(
-            photo=proof_data[uid]["photo"],
-            caption=(
-                "👀 **Preview Your Proof**\n\n"
-                f"🔗 {proof_data[uid]['link']}\n\n"
-                "⚠️ *Fake Or Same Device Proof = Ban*"
-            ),
-            parse_mode="Markdown",
-            reply_markup=preview_kb()
-        )
+    withdraw_state[uid] = "amount"
+    await update.message.reply_text("💸 Enter withdraw amount")
 
-# ========= MAIN =========
-app = ApplicationBuilder().token(TOKEN).build()
+async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if withdraw_state.get(uid) != "amount":
+        return
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(buttons))
-app.add_handler(MessageHandler(filters.ALL, messages))
+    try:
+        amt = int(update.message.text)
+    except:
+        await update.message.reply_text("❌ Invalid amount")
+        return
 
-print("🤖 Bot Running With Polling (Railway Ready)")
-app.run_polling()
+    if amt > users[uid]["balance"]:
+        await update.message.reply_text("❌ Insufficient balance")
+        withdraw_state.pop(uid, None)
+        return
+
+    withdraw_state.pop(uid, None)
+
+    await context.bot.send_message(
+        ADMIN_ID,
+        f"📤 Withdraw Request\n\n👤 `{uid}`\n💰 ₹{amt}\n🏦 {users[uid]['method']}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Paid", callback_data=f"pay_ok_{uid}_{amt}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"pay_no_{uid}"),
+                ]
+            ]
+        ),
+    )
+
+    await update.message.reply_text("📤 Withdraw request sent")
+
+# ---------- ADMIN ----------
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await update.message.reply_text("🛠 **Admin Panel**", reply_markup=ADMIN_KB)
+
+async def admin_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.data == "total_users":
+        await q.message.reply_text(f"👥 Total Users: {len(users)}")
+    else:
+        context.user_data["admin_action"] = q.data
+        await q.message.reply_text("Send:\nUSER_ID AMOUNT")
+
+async def admin_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "admin_action" not in context.user_data:
+        return
+
+    try:
+        uid, amt = map(int, update.message.text.split())
+    except:
+        await update.message.reply_text("❌ Invalid format")
+        return
+
+    users.setdefault(uid, {"balance": 0, "method": None})
+
+    if context.user_data["admin_action"] == "add_bal":
+        users[uid]["balance"] += amt
+    else:
+        users[uid]["balance"] = max(0, users[uid]["balance"] - amt)
+
+    context.user_data.pop("admin_action")
+    await update.message.reply_text("✅ Balance Updated")
+
+# ---------- PAYMENT CONFIRM ----------
+async def payment_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.data.startswith("pay_ok"):
+        _, uid, amt = q.data.split("_")
+        uid, amt = int(uid), int(amt)
+        users[uid]["balance"] -= amt
+        await context.bot.send_message(uid, "✅ Payment Sent")
+        await q.message.edit_text("✅ Paid")
+
+    elif q.data.startswith("pay_no"):
+        uid = int(q.data.split("_")[2])
+        await context.bot.send_message(uid, "❌ Withdraw Cancelled")
+        await q.message.edit_text("❌ Cancelled")
+
+# ---------- MAIN ----------
+def main():
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("dtx", admin_panel))
+
+    app.add_handler(MessageHandler(filters.Regex("Balance"), balance))
+    app.add_handler(MessageHandler(filters.Regex("Payment Method"), payment_method))
+    app.add_handler(MessageHandler(filters.Regex("Withdraw"), withdraw))
+
+    app.add_handler(CallbackQueryHandler(set_method, pattern="^method_"))
+    app.add_handler(CallbackQueryHandler(admin_actions))
+    app.add_handler(CallbackQueryHandler(payment_done, pattern="^pay_"))
+
+    app.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), admin_balance))
+    app.add_handler(MessageHandler(filters.TEXT, save_method))
+    app.add_handler(MessageHandler(filters.TEXT, withdraw_amount))
+
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
