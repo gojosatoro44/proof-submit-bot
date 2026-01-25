@@ -1,26 +1,30 @@
 import os
 import re
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, ConversationHandler, filters, CallbackQueryHandler
+    ContextTypes, ConversationHandler, filters
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# States
+# ---- STATES ----
 PROOF_SCREENSHOT, PROOF_LINK = range(2)
 WITHDRAW_METHOD, WITHDRAW_DETAIL, WITHDRAW_AMOUNT = range(3)
-ADMIN_ADD_BAL, ADMIN_REM_BAL, ADMIN_ADD_IDS = range(3)
+ADMIN_WAIT_INPUT = 10
 
-# Data storage
-USER_BALANCE = {}  # user_id: balance
-VERIFIED_IDS = {}  # user_id: amount or None
-PENDING_PROOFS = []  # temporary proofs storage
+# ---- STORAGE ----
+USER_BALANCE = {}
+VERIFIED_IDS = {}        # user_id(str) : amount(float or None)
+PROOF_SUBMITTED = set() # telegram user ids
+ALL_USERS = set()
+
+ADMIN_MODE = {}         # admin_id : current action
 
 # ---- START ----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ALL_USERS.add(update.effective_user.id)
     keyboard = [
         ["📤 Submit Proof"],
         ["💰 Balance", "💸 Withdraw"],
@@ -45,114 +49,90 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---- SUBMIT PROOF ----
 async def submit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📸 Send your screenshot of the proof first:")
+    await update.message.reply_text("📸 Send screenshot first:")
     return PROOF_SCREENSHOT
 
 async def proof_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
-        await update.message.reply_text("❌ Please send a valid screenshot (photo).")
+        await update.message.reply_text("❌ Send screenshot only.")
         return PROOF_SCREENSHOT
 
-    context.user_data["proof_screenshot"] = update.message.photo[-1].file_id
-    await update.message.reply_text("🔗 Now send the refer link:")
+    context.user_data["photo"] = update.message.photo[-1].file_id
+    await update.message.reply_text("🔗 Now send refer link:")
     return PROOF_LINK
 
 async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    match = re.search(r"start=(\d+)", text)
-    if not match:
-        await update.message.reply_text("❌ Invalid refer link. Send again.")
+    text = update.message.text
+    m = re.search(r"start=(\d+)", text)
+
+    if not m:
+        await update.message.reply_text("❌ Invalid refer link.")
         return PROOF_LINK
 
-    refer_id = match.group(1)
-    telegram_user_id = update.effective_user.id
-    proof_status = "❌ REJECTED"
-    amount_added = 0
+    ref_id = m.group(1)
+    tg_id = update.effective_user.id
+    PROOF_SUBMITTED.add(tg_id)
 
-    # Check verified IDs
-    if refer_id in VERIFIED_IDS:
-        proof_status = "✅ VERIFIED"
-        amt = VERIFIED_IDS[refer_id]
+    added = 0
+    if ref_id in VERIFIED_IDS:
+        amt = VERIFIED_IDS[ref_id]
         if amt:
-            USER_BALANCE[telegram_user_id] = USER_BALANCE.get(telegram_user_id, 0) + amt
-            amount_added = amt
-        del VERIFIED_IDS[refer_id]  # remove used ID
+            USER_BALANCE[tg_id] = USER_BALANCE.get(tg_id, 0) + amt
+            added = amt
+        del VERIFIED_IDS[ref_id]
 
         await update.message.reply_text(
-            f"✅ Proof verified successfully\n"
-            f"Payment/Balance will be added in 5 minutes\n"
-            f"Amount Added: ₹{amount_added}" if amount_added else ""
+            "✅ Proof verified successfully\n"
+            "Payment will be added in 5 minutes"
         )
     else:
         await update.message.reply_text(
-            "❌ Proof rejected due to same device/fake proof/fake refer"
+            "❌ Proof rejected due to same device/fake proof/refer"
         )
 
-    # Send proof to admin
     await context.bot.send_photo(
         ADMIN_ID,
-        photo=context.user_data["proof_screenshot"],
+        photo=context.user_data["photo"],
         caption=(
             f"📥 Proof Record\n"
-            f"Telegram User ID: {telegram_user_id}\n"
-            f"Refer ID: {refer_id}\n"
-            f"Status: {proof_status}\n"
-            f"Amount Added: ₹{amount_added}"
+            f"User: {tg_id}\n"
+            f"Refer ID: {ref_id}\n"
+            f"Amount Added: ₹{added}"
         )
     )
-
     return ConversationHandler.END
 
 # ---- WITHDRAW ----
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = ReplyKeyboardMarkup([["UPI", "VSV", "FXL"]], resize_keyboard=True)
-    await update.message.reply_text("Choose withdraw method:", reply_markup=keyboard)
+    kb = ReplyKeyboardMarkup([["UPI", "VSV", "FXL"]], resize_keyboard=True)
+    await update.message.reply_text("Choose withdraw method:", reply_markup=kb)
     return WITHDRAW_METHOD
 
 async def withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    method = update.message.text.upper()
-    if method not in ["UPI", "VSV", "FXL"]:
-        await update.message.reply_text("❌ Choose from the buttons (UPI/VSV/FXL).")
-        return WITHDRAW_METHOD
-
-    context.user_data["method"] = method
-    if method == "UPI":
-        await update.message.reply_text("Send your verified UPI ID:")
-    else:
-        await update.message.reply_text("Send your registered wallet number:")
+    context.user_data["method"] = update.message.text
+    await update.message.reply_text("Send payment detail:")
     return WITHDRAW_DETAIL
 
 async def withdraw_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["detail"] = update.message.text
-    min_amt = 5 if context.user_data["method"] == "UPI" else 2
-    await update.message.reply_text(f"Enter amount (Minimum ₹{min_amt}):")
+    await update.message.reply_text("Send amount:")
     return WITHDRAW_AMOUNT
 
 async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        amount = int(update.message.text)
-    except:
-        await update.message.reply_text("❌ Enter a valid number")
-        return WITHDRAW_AMOUNT
+    amt = int(update.message.text)
+    uid = update.effective_user.id
+    bal = USER_BALANCE.get(uid, 0)
 
-    bal = USER_BALANCE.get(update.effective_user.id, 0)
-    method = context.user_data["method"]
-    min_amt = 5 if method == "UPI" else 2
-
-    if amount < min_amt:
-        await update.message.reply_text("❌ Amount below minimum limit")
-        return ConversationHandler.END
-    if amount > bal:
+    if amt > bal:
         await update.message.reply_text("❌ Insufficient balance")
         return ConversationHandler.END
 
-    USER_BALANCE[update.effective_user.id] = bal - amount
-    await update.message.reply_text("✅ Withdraw request submitted. Payment will be processed soon.")
+    USER_BALANCE[uid] = bal - amt
+    await update.message.reply_text("✅ Withdraw request sent")
 
     await context.bot.send_message(
         ADMIN_ID,
-        f"💸 Withdraw Request\nUser ID: {update.effective_user.id}\n"
-        f"Method: {method}\nDetail: {context.user_data['detail']}\nAmount: ₹{amount}"
+        f"Withdraw\nUser: {uid}\nAmount: ₹{amt}"
     )
     return ConversationHandler.END
 
@@ -160,71 +140,105 @@ async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    keyboard = [
-        ["Add Balance", "Remove Balance"],
-        ["Total Users", "Verified IDs"]
+
+    kb = [
+        ["➕ Add Balance", "➖ Remove Balance"],
+        ["📋 Verified IDs", "👥 Total Users"],
+        ["🔍 Check Detail"]
     ]
     await update.message.reply_text(
         "Admin Panel",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True)
     )
 
-async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    text = update.message.text.strip()
-    lines = text.splitlines()
 
-    if lines[0].lower().startswith("verified"):
-        # Add Verified IDs with optional amount
-        for line in lines[1:]:
-            parts = line.split()
-            uid = parts[0]
-            amt = float(parts[1]) if len(parts) > 1 else None
-            VERIFIED_IDS[uid] = amt
-        await update.message.reply_text("✅ Verified IDs updated successfully.")
-    elif len(lines[0].split()) == 2:
-        uid, amt = lines[0].split()
-        amt = float(amt)
-        USER_BALANCE[int(uid)] = USER_BALANCE.get(int(uid), 0) + amt
-        await update.message.reply_text(f"✅ Balance added: ₹{amt} to {uid}")
-    elif len(lines[0].split()) == 1:
-        uid = lines[0]
-        USER_BALANCE[int(uid)] = USER_BALANCE.get(int(uid), 0)
-        await update.message.reply_text(f"✅ Balance check/created for {uid}")
+    text = update.message.text
+    ADMIN_MODE[ADMIN_ID] = text
+
+    if text == "📋 Verified IDs":
+        await update.message.reply_text(
+            "Send verified IDs:\nUSER_ID\nor\nUSER_ID AMOUNT"
+        )
+    elif text == "➕ Add Balance":
+        await update.message.reply_text("Send: USER_ID AMOUNT")
+    elif text == "➖ Remove Balance":
+        await update.message.reply_text("Send: USER_ID AMOUNT")
+    elif text == "👥 Total Users":
+        await update.message.reply_text(f"Total Users: {len(ALL_USERS)}")
+    elif text == "🔍 Check Detail":
+        await update.message.reply_text("Send User ID")
+
+async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    mode = ADMIN_MODE.get(ADMIN_ID)
+    parts = update.message.text.split()
+
+    if mode == "📋 Verified IDs":
+        uid = parts[0]
+        amt = float(parts[1]) if len(parts) == 2 else None
+        VERIFIED_IDS[uid] = amt
+        await update.message.reply_text("✅ Verified ID saved")
+
+    elif mode == "➕ Add Balance":
+        uid, amt = int(parts[0]), float(parts[1])
+        USER_BALANCE[uid] = USER_BALANCE.get(uid, 0) + amt
+        await update.message.reply_text("✅ Balance added")
+
+    elif mode == "➖ Remove Balance":
+        uid, amt = int(parts[0]), float(parts[1])
+        USER_BALANCE[uid] = max(0, USER_BALANCE.get(uid, 0) - amt)
+        await update.message.reply_text("✅ Balance removed")
+
+    elif mode == "🔍 Check Detail":
+        uid = int(parts[0])
+        await update.message.reply_text(
+            f"User ID: {uid}\n"
+            f"Balance: ₹{USER_BALANCE.get(uid,0)}\n"
+            f"Proof Submitted: {'Yes' if uid in PROOF_SUBMITTED else 'No'}"
+        )
 
 # ---- MAIN ----
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_panel))
+
+    app.add_handler(MessageHandler(filters.Regex("^📤 Submit Proof$"), submit_proof))
+    app.add_handler(MessageHandler(filters.Regex("^💰 Balance$"), balance))
+    app.add_handler(MessageHandler(filters.Regex("^🆘 Support$"), support))
+    app.add_handler(MessageHandler(filters.Regex("^💸 Withdraw$"), withdraw_start))
+
+    app.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), admin_actions))
+    app.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), admin_input))
+
     proof_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📤 Submit Proof$"), submit_proof)],
+        entry_points=[],
         states={
             PROOF_SCREENSHOT: [MessageHandler(filters.PHOTO, proof_screenshot)],
-            PROOF_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, proof_link)]
+            PROOF_LINK: [MessageHandler(filters.TEXT, proof_link)]
         },
         fallbacks=[]
     )
 
     withdraw_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^💸 Withdraw$"), withdraw_start)],
+        entry_points=[],
         states={
-            WITHDRAW_METHOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_method)],
-            WITHDRAW_DETAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_detail)],
-            WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_amount)],
+            WITHDRAW_METHOD: [MessageHandler(filters.TEXT, withdraw_method)],
+            WITHDRAW_DETAIL: [MessageHandler(filters.TEXT, withdraw_detail)],
+            WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT, withdraw_amount)]
         },
         fallbacks=[]
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(MessageHandler(filters.Regex("^💰 Balance$"), balance))
-    app.add_handler(MessageHandler(filters.Regex("^🆘 Support$"), support))
     app.add_handler(proof_conv)
     app.add_handler(withdraw_conv)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text))
 
-    # Fix single-instance polling
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
