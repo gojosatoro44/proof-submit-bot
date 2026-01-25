@@ -12,15 +12,16 @@ ADMIN_ID = 7112312810
 CHANNEL_USERNAME = "@TaskByZahid"
 CHANNEL_LINK = "https://t.me/TaskByZahid"
 
-# ================= DATA =================
-users = {}            # {user_id: {"balance": int}}
-states = {}           # user states
-payment_methods = {}  # {user_id: {"type": str, "detail": str}}
+# ================= STORAGE =================
+users = {}              # {uid: {"balance": int}}
+states = {}             # {uid: state}
+payment_methods = {}    # {uid: {"type": str, "detail": str}}
+temp_data = {}          # {uid: {...}}
 
 # ================= LOG =================
 logging.basicConfig(level=logging.INFO)
 
-# ================= UTILS =================
+# ================= HELPERS =================
 def get_user(uid):
     if uid not in users:
         users[uid] = {"balance": 0}
@@ -28,6 +29,7 @@ def get_user(uid):
 
 def clear_state(uid):
     states.pop(uid, None)
+    temp_data.pop(uid, None)
 
 async def is_joined(bot, uid):
     try:
@@ -59,8 +61,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not await is_joined(context.bot, uid):
         await update.message.reply_text(
-            "🔒 **ACCESS LOCKED** 🔒\n\n"
-            "👉 Join channel first to use this bot",
+            "🔒 **JOIN REQUIRED**\n\nJoin channel to use bot 👇",
             reply_markup=join_kb,
             parse_mode="Markdown"
         )
@@ -70,7 +71,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_state(uid)
 
     await update.message.reply_text(
-        "🔥 **WELCOME** 🔥\n\nChoose an option 👇",
+        "🔥 **WELCOME** 🔥\nChoose an option 👇",
         reply_markup=main_kb,
         parse_mode="Markdown"
     )
@@ -130,7 +131,8 @@ async def pm_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     method = q.data.split("_")[1]
 
-    states[uid] = f"pm_{method}"
+    states[uid] = "await_pm_detail"
+    temp_data[uid] = {"method": method}
 
     await context.bot.send_message(
         uid,
@@ -153,7 +155,7 @@ async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    states[uid] = "withdraw_amount"
+    states[uid] = "await_withdraw_amount"
 
     await context.bot.send_message(
         uid,
@@ -165,7 +167,8 @@ async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def submit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    states[q.from_user.id] = "await_ss"
+
+    states[q.from_user.id] = "await_screenshot"
 
     await context.bot.send_message(
         q.from_user.id,
@@ -173,14 +176,27 @@ async def submit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ================= MESSAGE HANDLER =================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= PHOTO =================
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    text = update.message.text
 
-    # Save payment method
-    if states.get(uid, "").startswith("pm_"):
-        method = states[uid].split("_")[1]
+    if states.get(uid) == "await_screenshot":
+        states[uid] = "await_refer_link"
+        temp_data[uid] = {"photo": update.message.photo[-1].file_id}
+
+        await update.message.reply_text(
+            "🔗 **Now send your refer link**",
+            parse_mode="Markdown"
+        )
+
+# ================= TEXT HANDLER (ALL LOGIC HERE) =================
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+
+    # PAYMENT METHOD SAVE
+    if states.get(uid) == "await_pm_detail":
+        method = temp_data[uid]["method"]
         payment_methods[uid] = {"type": method, "detail": text}
         clear_state(uid)
 
@@ -190,8 +206,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Withdraw amount
-    if states.get(uid) == "withdraw_amount":
+    # REFER LINK AFTER SCREENSHOT
+    if states.get(uid) == "await_refer_link":
+        photo_id = temp_data[uid]["photo"]
+
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Accept", callback_data=f"acc_{uid}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"rej_{uid}")
+            ]
+        ])
+
+        await context.bot.send_photo(
+            ADMIN_ID,
+            photo_id,
+            caption=f"🆕 **PROOF RECEIVED**\n\n👤 `{uid}`\n🔗 {text}",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+
+        clear_state(uid)
+
+        await update.message.reply_text(
+            "✅ **Proof submitted successfully**",
+            parse_mode="Markdown"
+        )
+        return
+
+    # WITHDRAW AMOUNT
+    if states.get(uid) == "await_withdraw_amount":
         if not text.isdigit():
             await update.message.reply_text("❌ Enter valid amount")
             return
@@ -208,10 +251,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             ADMIN_ID,
             f"💸 **WITHDRAW REQUEST**\n\n"
-            f"👤 User: `{uid}`\n"
+            f"👤 `{uid}`\n"
             f"₹ Amount: {amount}\n"
-            f"💳 Method: {pm['type'].upper()}\n"
-            f"📄 Detail: {pm['detail']}",
+            f"💳 {pm['type'].upper()}\n"
+            f"📄 {pm['detail']}",
             parse_mode="Markdown"
         )
 
@@ -222,50 +265,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# ================= PHOTO =================
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-
-    if states.get(uid) == "await_ss":
-        states[uid] = "await_link"
-        context.user_data["ss"] = update.message.photo[-1].file_id
-
-        await update.message.reply_text(
-            "🔗 **Send refer link now**",
-            parse_mode="Markdown"
-        )
-
-# ================= TEXT (REFER LINK) =================
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-
-    if states.get(uid) == "await_link":
-        ss = context.user_data.get("ss")
-        link = update.message.text
-
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Accept", callback_data=f"acc_{uid}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"rej_{uid}")
-            ]
-        ])
-
-        await context.bot.send_photo(
-            ADMIN_ID,
-            ss,
-            caption=f"🆕 **PROOF RECEIVED**\n\n👤 `{uid}`\n🔗 {link}",
-            parse_mode="Markdown",
-            reply_markup=kb
-        )
-
-        clear_state(uid)
-        await update.message.reply_text("✅ **Proof submitted**")
-
-# ================= ADMIN ACTION =================
+# ================= ADMIN =================
 async def admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-
     uid = int(q.data.split("_")[1])
 
     if q.data.startswith("acc"):
@@ -290,7 +293,6 @@ app.add_handler(CallbackQueryHandler(admin_action, pattern="acc_|rej_"))
 
 app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("🤖 Bot running...")
 app.run_polling()
