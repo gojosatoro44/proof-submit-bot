@@ -12,12 +12,12 @@ ADMIN_ID = 7112312810
 
 logging.basicConfig(level=logging.INFO)
 
-# ───────────── MEMORY STORAGE ─────────────
-users = {}          # user_id: {balance, payment}
-proof_wait = {}     # user_id: step
-withdraw_wait = {}  # user_id: step
+# ───────── STORAGE ─────────
+users = {}          # uid: {balance, payment}
+states = {}         # uid: current_state
+temp = {}           # uid: temp data
 
-# ───────────── KEYBOARDS ─────────────
+# ───────── KEYBOARDS ─────────
 main_kb = ReplyKeyboardMarkup(
     [
         ["📤 Submit Proof"],
@@ -44,22 +44,27 @@ admin_kb = InlineKeyboardMarkup([
     [InlineKeyboardButton("👥 Total Users", callback_data="admin_users")]
 ])
 
-# ───────────── HELPERS ─────────────
+# ───────── HELPERS ─────────
 def get_user(uid):
     if uid not in users:
         users[uid] = {"balance": 0, "payment": None}
     return users[uid]
 
-# ───────────── START ─────────────
+def clear_state(uid):
+    states.pop(uid, None)
+    temp.pop(uid, None)
+
+# ───────── START ─────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     get_user(update.effective_user.id)
+    clear_state(update.effective_user.id)
     await update.message.reply_text(
         "✅ *Bot Ready*\nUse buttons below 👇",
         reply_markup=main_kb,
         parse_mode="Markdown"
     )
 
-# ───────────── BALANCE ─────────────
+# ───────── BALANCE ─────────
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update.effective_user.id)
     await update.message.reply_text(
@@ -67,28 +72,68 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ───────────── SUBMIT PROOF ─────────────
+# ───────── SUBMIT PROOF ─────────
 async def submit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    proof_wait[update.effective_user.id] = "photo"
+    uid = update.effective_user.id
+    clear_state(uid)
+    states[uid] = "WAIT_PROOF_PHOTO"
     await update.message.reply_text(
         "📸 Send screenshot where *refer link is visible*",
         parse_mode="Markdown"
     )
 
-async def handle_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ───────── PAYMENT METHOD ─────────
+async def payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if proof_wait.get(uid) == "photo" and update.message.photo:
-        proof_wait[uid] = "link"
-        context.user_data["proof_photo"] = update.message.photo[-1].file_id
-        await update.message.reply_text("🔗 Now send your *refer link*")
-    elif proof_wait.get(uid) == "link":
-        refer = update.message.text
-        photo = context.user_data.get("proof_photo")
+    clear_state(uid)
+    await update.message.reply_text(
+        "🤯 Choose Payment Method",
+        reply_markup=payment_kb
+    )
+
+async def payment_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    method = q.data.replace("pay_", "")
+    temp[uid] = {"method": method}
+    states[uid] = "WAIT_PAYMENT_VALUE"
+
+    if method == "upi":
+        msg = "🔗 Send your *UPI ID*"
+    else:
+        msg = "📱 Send your *Registered Number*"
+
+    await q.message.reply_text(msg, parse_mode="Markdown")
+
+# ───────── WITHDRAW ─────────
+async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user = get_user(uid)
+
+    if not user["payment"]:
+        await update.message.reply_text("❌ Set payment method first")
+        return
+
+    clear_state(uid)
+    states[uid] = "WAIT_WITHDRAW_AMOUNT"
+    await update.message.reply_text("💸 Enter amount to withdraw")
+
+# ───────── MAIN TEXT HANDLER (FIXED CORE) ─────────
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = update.message.text
+    state = states.get(uid)
+
+    # ── Proof: Refer link ──
+    if state == "WAIT_PROOF_LINK":
+        photo = temp[uid]["photo"]
 
         await context.bot.send_photo(
             ADMIN_ID,
             photo=photo,
-            caption=f"`{uid}`\n🔗 {refer}",
+            caption=f"`{uid}`\n🔗 {text}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [
@@ -98,90 +143,77 @@ async def handle_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
 
-        proof_wait.pop(uid)
+        clear_state(uid)
         await update.message.reply_text(
             "✅ Proof Submitted\n⏳ Wait for verification"
         )
+        return
 
-# ───────────── PROOF ACTION ─────────────
+    # ── Save Payment ──
+    if state == "WAIT_PAYMENT_VALUE":
+        users[uid]["payment"] = {
+            "method": temp[uid]["method"],
+            "value": text
+        }
+        clear_state(uid)
+        await update.message.reply_text("✅ Payment Method Saved Successfully")
+        return
+
+    # ── Withdraw Amount ──
+    if state == "WAIT_WITHDRAW_AMOUNT":
+        if not text.isdigit():
+            await update.message.reply_text("❌ Enter a valid number")
+            return
+
+        amount = int(text)
+        user = get_user(uid)
+
+        if amount > user["balance"]:
+            await update.message.reply_text("❌ Insufficient balance")
+            return
+
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"💸 Withdraw Request\nUser: `{uid}`\nAmount: ₹{amount}\nMethod: {user['payment']}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✅ Payment Cleared",
+                        callback_data=f"wd_ok_{uid}_{amount}"
+                    ),
+                    InlineKeyboardButton("❌ Cancel", callback_data="cancel")
+                ]
+            ])
+        )
+
+        clear_state(uid)
+        await update.message.reply_text("📤 Withdraw request sent")
+        return
+
+# ───────── PHOTO HANDLER (PROOF FIXED) ─────────
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if states.get(uid) == "WAIT_PROOF_PHOTO":
+        temp[uid] = {"photo": update.message.photo[-1].file_id}
+        states[uid] = "WAIT_PROOF_LINK"
+        await update.message.reply_text("🔗 Now send your *refer link*")
+
+# ───────── PROOF ACTION ─────────
 async def proof_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    data = q.data.split("_")
-    uid = int(data[2])
+    action, uid = q.data.split("_")[1:]
+    uid = int(uid)
 
-    if data[1] == "ok":
+    if action == "ok":
         await context.bot.send_message(uid, "✅ Proof Approved")
     else:
         await context.bot.send_message(uid, "❌ Proof Rejected")
 
     await q.edit_message_reply_markup(None)
 
-# ───────────── PAYMENT METHOD ─────────────
-async def payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤯 Choose Payment Method",
-        reply_markup=payment_kb
-    )
-
-async def payment_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-
-    uid = q.from_user.id
-    method = q.data.replace("pay_", "")
-    context.user_data["pay_method"] = method
-
-    msg = "Send UPI ID" if method == "upi" else "Send Registered Number"
-    await q.message.reply_text(msg)
-    withdraw_wait[uid] = "payment"
-
-async def save_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if withdraw_wait.get(uid) == "payment":
-        users[uid]["payment"] = {
-            "method": context.user_data["pay_method"],
-            "value": update.message.text
-        }
-        withdraw_wait.pop(uid)
-        await update.message.reply_text("✅ Payment Method Saved")
-
-# ───────────── WITHDRAW ─────────────
-async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    user = get_user(uid)
-
-    if not user["payment"]:
-        await update.message.reply_text("❌ Set payment method first")
-        return
-
-    withdraw_wait[uid] = "amount"
-    await update.message.reply_text("💸 Enter amount to withdraw")
-
-async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if withdraw_wait.get(uid) == "amount":
-        amt = int(update.message.text)
-        user = get_user(uid)
-
-        if amt > user["balance"]:
-            await update.message.reply_text("❌ Insufficient balance")
-            return
-
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"💸 Withdraw Request\nUser: `{uid}`\nAmount: ₹{amt}\nMethod: {user['payment']}",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Payment Cleared", callback_data=f"wd_ok_{uid}_{amt}"),
-                    InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-                ]
-            ])
-        )
-        withdraw_wait.pop(uid)
-        await update.message.reply_text("📤 Withdraw request sent")
-
+# ───────── WITHDRAW ACTION ─────────
 async def withdraw_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -189,10 +221,12 @@ async def withdraw_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid, amt = int(uid), int(amt)
 
     users[uid]["balance"] -= amt
-    await context.bot.send_message(uid, "✅ Your payment has been sent")
+    await context.bot.send_message(
+        uid, "✅ Your payment has been sent to your registered method"
+    )
     await q.edit_message_reply_markup(None)
 
-# ───────────── ADMIN PANEL ─────────────
+# ───────── ADMIN PANEL ─────────
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
         await update.message.reply_text(
@@ -208,7 +242,7 @@ async def admin_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "admin_users":
         await q.message.reply_text(f"👥 Total Users: {len(users)}")
 
-# ───────────── RUN ─────────────
+# ───────── RUN ─────────
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
@@ -219,14 +253,13 @@ app.add_handler(MessageHandler(filters.Regex("Balance"), balance))
 app.add_handler(MessageHandler(filters.Regex("Withdraw"), withdraw))
 app.add_handler(MessageHandler(filters.Regex("Payment Method"), payment_method))
 
-app.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, handle_proof))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_withdraw))
-app.add_handler(MessageHandler(filters.TEXT, save_payment))
+app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
-app.add_handler(CallbackQueryHandler(proof_action, pattern="proof_"))
 app.add_handler(CallbackQueryHandler(payment_select, pattern="pay_"))
+app.add_handler(CallbackQueryHandler(proof_action, pattern="proof_"))
 app.add_handler(CallbackQueryHandler(withdraw_action, pattern="wd_"))
 app.add_handler(CallbackQueryHandler(admin_actions, pattern="admin_"))
 
-print("🤖 Bot running...")
+print("🤖 Bot running (stable build)...")
 app.run_polling()
