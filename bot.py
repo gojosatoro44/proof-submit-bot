@@ -1,5 +1,5 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ConversationHandler, filters, ContextTypes
 
 # ===== CONFIG =====
 TOKEN = "8548363818:AAGBl61ZfCenlQwKhuAzBFPoTqd1Dy2qHN0"
@@ -43,8 +43,7 @@ async def check_force_join(user_id, context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    joined = await check_force_join(user_id, context)
-    if not joined:
+    if not await check_force_join(user_id, context):
         await update.message.reply_text(
             "🚨 **Please Join Our Channel To Access The Bot!** 🚨",
             reply_markup=join_button(),
@@ -68,7 +67,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
-    # Force join
     if not await check_force_join(user_id, context):
         await query.message.reply_text(
             "🚨 **You Must Join Our Channel First!** 🚨",
