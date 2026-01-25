@@ -1,268 +1,207 @@
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ConversationHandler, ContextTypes, filters
-)
+import asyncio
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import *
+from aiogram.filters import Command
+import aiosqlite
 
-# ================= CONFIG =================
-BOT_TOKEN = "8548363818:AAGBl61ZfCenlQwKhuAzBFPoTqd1Dy2qHN0"
+BOT_TOKEN = "8548363818:AAGiZ81aDQrBz3Eva2rXB4Pp6fp4RkFimBE"
 ADMIN_ID = 7112312810
-CHANNEL_USERNAME = "TaskByZahid"
+FORCE_CHANNEL = "@TaskByZahid"
 
-logging.basicConfig(level=logging.INFO)
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
 
-# ================= STATES =================
-PROOF_PHOTO, PROOF_LINK = range(2)
-PAYMENT_TEXT = 3
-W_METHOD, W_DETAIL, W_AMOUNT, W_CONFIRM = range(4, 8)
-
-# ================= FORCE JOIN =================
-async def is_joined(update, context):
-    try:
-        member = await context.bot.get_chat_member(
-            f"@{CHANNEL_USERNAME}", update.effective_user.id
+# ---------- DATABASE ----------
+async def init_db():
+    async with aiosqlite.connect("bot.db") as db:
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            balance INTEGER DEFAULT 0
         )
+        """)
+        await db.commit()
+
+asyncio.get_event_loop().run_until_complete(init_db())
+
+# ---------- FORCE JOIN ----------
+async def is_joined(user_id):
+    try:
+        member = await bot.get_chat_member(FORCE_CHANNEL, user_id)
         return member.status in ["member", "administrator", "creator"]
     except:
         return False
 
-
-async def force_join(update, context):
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔔 Join Channel", url=f"https://t.me/{CHANNEL_USERNAME}")],
-        [InlineKeyboardButton("✅ I Joined", callback_data="check_join")]
-    ])
-    await update.message.reply_text(
-        "🚫 **Access Locked**\n\n"
-        "You must join our channel to use this bot.",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
-
-
-# ================= START =================
-async def start(update, context):
-    if not await is_joined(update, context):
-        return await force_join(update, context)
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Submit Proof", callback_data="submit_proof")],
-        [
-            InlineKeyboardButton("💰 Balance", callback_data="balance"),
-            InlineKeyboardButton("💸 Withdraw", callback_data="withdraw")
-        ],
-        [InlineKeyboardButton("💳 Payment Method", callback_data="payment_method")],
+def join_button():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Join Channel", url="http://t.me/TaskByZahid")],
+        [InlineKeyboardButton(text="🔄 Check Join", callback_data="check_join")]
     ])
 
-    await update.message.reply_text(
-        "✨ **Welcome Back!** ✨\n\nChoose an option below 👇",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
+# ---------- START ----------
+@dp.message(Command("start"))
+async def start(msg: Message):
+    if not await is_joined(msg.from_user.id):
+        await msg.answer("❌ You must join channel to use bot", reply_markup=join_button())
+        return
+
+    async with aiosqlite.connect("bot.db") as db:
+        await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (msg.from_user.id,))
+        await db.commit()
+
+    await msg.answer(
+        "Welcome to Task Bot 👋",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[
+                ["📸 Submit Proof", "💰 Balance"],
+                ["💸 Withdraw", "🆘 Support"]
+            ],
+            resize_keyboard=True
+        )
     )
 
-
-async def check_join(update, context):
-    query = update.callback_query
-    await query.answer()
-    if await is_joined(update, context):
-        await query.message.delete()
-        await start(update, context)
+@dp.callback_query(F.data == "check_join")
+async def check_join(cb: CallbackQuery):
+    if await is_joined(cb.from_user.id):
+        await cb.message.delete()
+        await start(cb.message)
     else:
-        await query.answer("Join the channel first!", show_alert=True)
+        await cb.answer("❌ Still not joined", show_alert=True)
 
+# ---------- SUBMIT PROOF ----------
+@dp.message(F.text == "📸 Submit Proof")
+async def submit_proof(msg: Message):
+    await msg.answer("📸 Send Screenshot of bot")
+    dp.message.register(get_screenshot)
 
-# ================= SUBMIT PROOF =================
-async def submit_proof_start(update, context):
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text(
-        "📸 **Send proof screenshot**\n\n"
-        "⚠ Refer link must be visible",
-        parse_mode="Markdown"
-    )
-    return PROOF_PHOTO
+async def get_screenshot(msg: Message):
+    if not msg.photo:
+        await msg.answer("❌ Send screenshot only")
+        return
+    dp.message.unregister(get_screenshot)
+    dp.message.register(get_refer, photo=msg.photo[-1].file_id)
+    await msg.answer("🔗 Send your refer link to verify")
 
+async def get_refer(msg: Message, photo):
+    refer = msg.text
+    dp.message.unregister(get_refer)
 
-async def proof_photo(update, context):
-    context.user_data["proof_photo"] = update.message.photo[-1].file_id
-    await update.message.reply_text(
-        "🔗 **Now send your refer link**",
-        parse_mode="Markdown"
-    )
-    return PROOF_LINK
-
-
-async def proof_link(update, context):
-    user = update.effective_user
-
-    await context.bot.send_photo(
+    await bot.send_photo(
         ADMIN_ID,
-        context.user_data["proof_photo"],
-        caption=(
-            "📥 **New Proof Received**\n\n"
-            f"👤 User ID: `{user.id}`\n"
-            f"🔗 Refer Link: {update.message.text}"
-        ),
-        parse_mode="Markdown"
+        photo,
+        caption=f"""
+📸 NEW PROOF SUBMITTED
+
+👤 User ID: {msg.from_user.id}
+🔗 Refer Link: {refer}
+        """,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Accept", callback_data=f"proof_ok:{msg.from_user.id}"),
+                InlineKeyboardButton(text="❌ Reject", callback_data=f"proof_no:{msg.from_user.id}")
+            ]
+        ])
     )
 
-    await update.message.reply_text(
-        "✅ **Proof submitted successfully**",
-        parse_mode="Markdown"
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
+    await msg.answer("✅ Proof has been submitted successfully for verification")
 
+@dp.callback_query(F.data.startswith("proof_"))
+async def proof_action(cb: CallbackQuery):
+    action, uid = cb.data.split(":")
+    uid = int(uid)
 
-# ================= PAYMENT METHOD (FIXED) =================
-async def payment_method_start(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    await query.message.reply_text(
-        "💳 **Send your payment details**\n\n"
-        "Examples:\n"
-        "• UPI: yourupi@bank\n"
-        "• VSV: 9XXXXXXXXX\n"
-        "• FXL: 9XXXXXXXXX",
-        parse_mode="Markdown"
-    )
-    return PAYMENT_TEXT
-
-
-async def save_payment_method(update, context):
-    context.user_data["payment_method"] = update.message.text
-
-    await update.message.reply_text(
-        "✅ **Payment method saved successfully**",
-        parse_mode="Markdown"
-    )
-    return ConversationHandler.END
-
-
-# ================= WITHDRAW (UNCHANGED) =================
-async def withdraw_start(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    await query.message.reply_text(
-        "💸 **Enter withdraw method**\n\n"
-        "UPI / VSV / FXL",
-        parse_mode="Markdown"
-    )
-    return W_METHOD
-
-
-async def withdraw_method(update, context):
-    context.user_data["w_method"] = update.message.text.upper()
-    await update.message.reply_text(
-        "📄 **Send your UPI ID or Number**",
-        parse_mode="Markdown"
-    )
-    return W_DETAIL
-
-
-async def withdraw_detail(update, context):
-    context.user_data["w_detail"] = update.message.text
-    await update.message.reply_text(
-        "💰 **Enter amount to withdraw**",
-        parse_mode="Markdown"
-    )
-    return W_AMOUNT
-
-
-async def withdraw_amount(update, context):
-    context.user_data["w_amount"] = update.message.text
-
-    text = (
-        "📤 **Withdraw Preview**\n\n"
-        f"Method: {context.user_data['w_method']}\n"
-        f"Detail: {context.user_data['w_detail']}\n"
-        f"Amount: ₹{context.user_data['w_amount']}"
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Proceed", callback_data="w_proceed")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="w_cancel")]
-    ])
-
-    await update.message.reply_text(
-        text,
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
-    return W_CONFIRM
-
-
-async def withdraw_confirm(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "w_proceed":
-        user = query.from_user
-        await context.bot.send_message(
-            ADMIN_ID,
-            (
-                "💸 **Withdraw Request**\n\n"
-                f"👤 User ID: `{user.id}`\n"
-                f"Method: {context.user_data['w_method']}\n"
-                f"Detail: {context.user_data['w_detail']}\n"
-                f"Amount: ₹{context.user_data['w_amount']}"
-            ),
-            parse_mode="Markdown"
-        )
-        await query.message.reply_text(
-            "✅ **Withdraw request sent**",
-            parse_mode="Markdown"
-        )
+    if action == "proof_ok":
+        await bot.send_message(uid, "✅ Proof verified successfully\nBalance will be added in 5-10 minutes")
     else:
-        await query.message.reply_text(
-            "❌ **Withdraw cancelled**",
-            parse_mode="Markdown"
-        )
+        await bot.send_message(uid, "❌ Proof rejected due to fake proof / same device")
 
-    context.user_data.clear()
-    return ConversationHandler.END
+    await cb.message.edit_reply_markup()
 
+# ---------- BALANCE ----------
+@dp.message(F.text == "💰 Balance")
+async def balance(msg: Message):
+    async with aiosqlite.connect("bot.db") as db:
+        cur = await db.execute("SELECT balance FROM users WHERE user_id=?", (msg.from_user.id,))
+        bal = (await cur.fetchone())[0]
+    await msg.answer(f"💰 Your Balance: ₹{bal}\nKeep completing tasks!")
 
-# ================= MAIN =================
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+# ---------- WITHDRAW ----------
+@dp.message(F.text == "💸 Withdraw")
+async def withdraw(msg: Message):
+    await msg.answer(
+        "Select Withdraw Method",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="VSV", callback_data="wd_VSV"),
+             InlineKeyboardButton(text="FXL", callback_data="wd_FXL"),
+             InlineKeyboardButton(text="UPI", callback_data="wd_UPI")]
+        ])
+    )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(check_join, pattern="check_join"))
+@dp.callback_query(F.data.startswith("wd_"))
+async def wd_method(cb: CallbackQuery):
+    method = cb.data.split("_")[1]
+    await cb.message.answer(f"Send your {method} Wallet / UPI ID")
+    dp.message.register(wd_amount, method=method)
 
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(submit_proof_start, pattern="submit_proof")],
-        states={
-            PROOF_PHOTO: [MessageHandler(filters.PHOTO, proof_photo)],
-            PROOF_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, proof_link)],
-        },
-        fallbacks=[]
-    ))
+async def wd_amount(msg: Message, method):
+    wallet = msg.text
+    dp.message.unregister(wd_amount)
+    await msg.answer(
+        f"Send withdraw amount\nMinimum:\nUPI ₹5\nVSV/FXL ₹2"
+    )
+    dp.message.register(wd_confirm, wallet=wallet, method=method)
 
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(payment_method_start, pattern="payment_method")],
-        states={
-            PAYMENT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_payment_method)],
-        },
-        fallbacks=[]
-    ))
+async def wd_confirm(msg: Message, wallet, method):
+    amount = int(msg.text)
+    min_amt = 5 if method == "UPI" else 2
 
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(withdraw_start, pattern="withdraw")],
-        states={
-            W_METHOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_method)],
-            W_DETAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_detail)],
-            W_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_amount)],
-            W_CONFIRM: [CallbackQueryHandler(withdraw_confirm)],
-        },
-        fallbacks=[]
-    ))
+    async with aiosqlite.connect("bot.db") as db:
+        cur = await db.execute("SELECT balance FROM users WHERE user_id=?", (msg.from_user.id,))
+        bal = (await cur.fetchone())[0]
 
-    app.run_polling()
+    if amount < min_amt or amount > bal:
+        await msg.answer("❌ Invalid amount")
+        return
 
+    await bot.send_message(
+        ADMIN_ID,
+        f"""
+💸 WITHDRAW REQUEST
 
-if __name__ == "__main__":
-    main()
+User ID: {msg.from_user.id}
+Method: {method}
+Detail: {wallet}
+Amount: ₹{amount}
+        """,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Withdraw Cleared", callback_data=f"wd_ok:{msg.from_user.id}:{amount}"),
+                InlineKeyboardButton(text="❌ Withdraw Rejected", callback_data=f"wd_no:{msg.from_user.id}")
+            ]
+        ])
+    )
+    await msg.answer("✅ Withdraw request sent to owner")
+
+# ---------- SUPPORT ----------
+@dp.message(F.text == "🆘 Support")
+async def support(msg: Message):
+    await msg.answer(
+        "If you are facing any issue,\nContact Owner: @DTXZAHID"
+    )
+
+# ---------- ADMIN PANEL ----------
+@dp.message(Command("admin"))
+async def admin(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    async with aiosqlite.connect("bot.db") as db:
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        total = (await cur.fetchone())[0]
+
+    await msg.answer(f"👑 Admin Panel\n👥 Total Users: {total}")
+
+# ---------- RUN ----------
+async def main():
+    await dp.start_polling(bot)
+
+asyncio.run(main())
