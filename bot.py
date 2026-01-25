@@ -1,29 +1,27 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ConversationHandler, filters, ContextTypes
-import os
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler, ContextTypes
 
-# ======= CONFIG =======
+# ===== CONFIG =====
 TOKEN = "8548363818:AAGBl61ZfCenlQwKhuAzBFPoTqd1Dy2qHN0"
 ADMIN_ID = 7112312810
 CHANNEL_LINK = "http://t.me/TaskByZahid"
 
-# ======= STATES =======
-ASK_REFER, PAYMENT_METHOD, WITHDRAW_AMOUNT, WITHDRAW_METHOD, WITHDRAW_CONFIRM = range(5)
+# ===== STATES =====
+PROOF_SCREENSHOT, PROOF_LINK, PAYMENT_METHOD_FLOW, WITHDRAW_AMOUNT, WITHDRAW_METHOD, WITHDRAW_CONFIRM = range(6)
 
-# ======= DATABASE SIMULATION =======
+# ===== STORAGE =====
 user_data_store = {}  # {user_id: {"balance": 0, "payment": None}}
 
-# ======= BUTTONS =======
+# ===== BUTTONS =====
 def main_buttons():
-    keyboard = [
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📸 Submit Proof", callback_data="submit_proof"),
             InlineKeyboardButton("💰 Balance", callback_data="balance"),
             InlineKeyboardButton("💸 Withdraw", callback_data="withdraw"),
             InlineKeyboardButton("💳 Payment Method", callback_data="payment_method")
         ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    ])
 
 def cancel_button():
     return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
@@ -31,21 +29,21 @@ def cancel_button():
 def join_button():
     return InlineKeyboardMarkup([[InlineKeyboardButton("👉 Join Channel", url=CHANNEL_LINK)]])
 
-# ======= FORCE JOIN CHECK =======
+# ===== FORCE JOIN CHECK =====
 async def check_force_join(user_id, context):
     try:
-        member = await context.bot.get_chat_member(chat_id=CHANNEL_LINK.split("/")[-1], user_id=user_id)
+        member = await context.bot.get_chat_member(CHANNEL_LINK.split("/")[-1], user_id)
         if member.status in ["left", "kicked"]:
             return False
         return True
     except:
         return False
 
-# ======= START COMMAND =======
+# ===== START =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    joined = await check_force_join(user_id, context)
+    user_id = update.effective_user.id
 
+    joined = await check_force_join(user_id, context)
     if not joined:
         await update.message.reply_text(
             "🚨 **Please Join Our Channel To Access The Bot!** 🚨",
@@ -54,7 +52,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Initialize user data if not exists
     if user_id not in user_data_store:
         user_data_store[user_id] = {"balance": 0, "payment": None}
 
@@ -64,13 +61,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="MarkdownV2"
     )
 
-# ======= CALLBACK HANDLER =======
+# ===== BUTTON HANDLER =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     data = query.data
 
+    # Force join
     if not await check_force_join(user_id, context):
         await query.message.reply_text(
             "🚨 **You Must Join Our Channel First!** 🚨",
@@ -81,11 +79,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "submit_proof":
         await query.message.reply_text(
-            "**Please Send Screenshot Of Proof With Refer Link Visible**",
+            "**Send Screenshot Of Proof With Refer Link Visible**",
             reply_markup=cancel_button(),
             parse_mode="MarkdownV2"
         )
-        return ASK_REFER
+        return PROOF_SCREENSHOT
 
     elif data == "balance":
         bal = user_data_store.get(user_id, {}).get("balance", 0)
@@ -113,24 +111,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         await query.message.reply_text("**Choose Payment Method:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="MarkdownV2")
-        return PAYMENT_METHOD
+        return PAYMENT_METHOD_FLOW
 
     elif data == "cancel":
         await query.message.reply_text("**Operation Cancelled ✅**", reply_markup=main_buttons(), parse_mode="MarkdownV2")
         return ConversationHandler.END
 
-# ======= PAYMENT METHOD HANDLER =======
+# ===== PAYMENT METHOD =====
 async def payment_method_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = query.from_user.id
     await query.answer()
-
+    user_id = query.from_user.id
     method = query.data.split("_")[1]
     user_data_store[user_id]["payment"] = method
     await query.message.reply_text(f"**Payment Method Saved ✅ ({method})**", reply_markup=main_buttons(), parse_mode="MarkdownV2")
     return ConversationHandler.END
 
-# ======= WITHDRAW FLOW =======
+# ===== WITHDRAW FLOW =====
 async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     try:
@@ -159,7 +156,6 @@ async def withdraw_method_choice(update: Update, context: ContextTypes.DEFAULT_T
     user_id = query.from_user.id
     method = query.data.split("_")[1]
     context.user_data["withdraw_method"] = method
-
     amount = context.user_data["withdraw_amount"]
     await query.message.reply_text(
         f"**You Are Withdrawing ₹{amount} Via {method}**",
@@ -177,11 +173,7 @@ async def withdraw_submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     amount = context.user_data.get("withdraw_amount")
     method = context.user_data.get("withdraw_method")
-
-    # Deduct balance
     user_data_store[user_id]["balance"] -= amount
-
-    # Send details to admin
     await context.bot.send_message(
         ADMIN_ID,
         f"💰 Withdraw Request\n`User ID: {user_id}`\nAmount: ₹{amount}\nMethod: {method}",
@@ -190,8 +182,8 @@ async def withdraw_submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text("**Withdraw Request Sent ✅**", reply_markup=main_buttons(), parse_mode="MarkdownV2")
     return ConversationHandler.END
 
-# ======= PROOF HANDLER =======
-async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ===== PROOF FLOW =====
+async def proof_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not await check_force_join(user_id, context):
         await update.message.reply_text(
@@ -200,26 +192,21 @@ async def proof_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="MarkdownV2"
         )
         return
-
     if update.message.photo or update.message.document:
-        # Save screenshot temporarily
         context.user_data["proof_file"] = update.message.photo[-1].file_id if update.message.photo else update.message.document.file_id
         await update.message.reply_text("**Send Your Refer Link Now:**", parse_mode="MarkdownV2")
-        return ASK_REFER
+        return PROOF_LINK
     else:
         await update.message.reply_text("**Send A Screenshot Or Document ❌**", parse_mode="MarkdownV2")
-        return ASK_REFER
+        return PROOF_SCREENSHOT
 
-async def refer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def proof_refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     refer_link = update.message.text
-
     proof_file = context.user_data.get("proof_file")
     if not proof_file:
-        await update.message.reply_text("**Please Send Screenshot First ❌**", parse_mode="MarkdownV2")
-        return ASK_REFER
-
-    # Send to admin
+        await update.message.reply_text("**Send Screenshot First ❌**", parse_mode="MarkdownV2")
+        return PROOF_SCREENSHOT
     await context.bot.send_photo(
         ADMIN_ID,
         photo=proof_file,
@@ -229,24 +216,29 @@ async def refer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("**Proof Submitted ✅**", reply_markup=main_buttons(), parse_mode="MarkdownV2")
     return ConversationHandler.END
 
-# ======= MAIN =======
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
+# ===== CANCEL =====
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("**Operation Cancelled ✅**", reply_markup=main_buttons(), parse_mode="MarkdownV2")
+    return ConversationHandler.END
 
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler)],
-        states={
-            ASK_REFER: [MessageHandler(filters.TEXT & ~filters.COMMAND, refer_handler)],
-            PAYMENT_METHOD: [CallbackQueryHandler(payment_method_choice)],
-            WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_amount)],
-            WITHDRAW_METHOD: [CallbackQueryHandler(withdraw_method_choice)],
-            WITHDRAW_CONFIRM: [CallbackQueryHandler(withdraw_submit)]
-        },
-        fallbacks=[CallbackQueryHandler(button_handler)]
-    )
+# ===== MAIN =====
+app = ApplicationBuilder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv_handler)
+conv_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(button_handler)],
+    states={
+        PROOF_SCREENSHOT: [MessageHandler(filters.PHOTO | filters.Document.ALL, proof_screenshot)],
+        PROOF_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, proof_refer)],
+        PAYMENT_METHOD_FLOW: [CallbackQueryHandler(payment_method_choice)],
+        WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_amount)],
+        WITHDRAW_METHOD: [CallbackQueryHandler(withdraw_method_choice)],
+        WITHDRAW_CONFIRM: [CallbackQueryHandler(withdraw_submit)],
+    },
+    fallbacks=[CallbackQueryHandler(cancel)]
+)
 
-    print("Bot Running 24/7 ✅")
-    app.run_polling()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(conv_handler)
+
+print("Bot Running 24/7 ✅")
+app.run_polling()
