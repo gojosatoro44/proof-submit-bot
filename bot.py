@@ -9,10 +9,15 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
+# States
+PROOF_SCREENSHOT, PROOF_LINK = range(2)
 WITHDRAW_METHOD, WITHDRAW_DETAIL, WITHDRAW_AMOUNT = range(3)
-VERIFIED_IDS = []  # Add your initial verified IDs here
-PENDING_PROOFS = []  # List to store proofs temporarily
-USER_BALANCE = {}  # Store user balances
+ADMIN_ADD_BAL, ADMIN_REM_BAL, ADMIN_ADD_IDS = range(3)
+
+# Data storage
+USER_BALANCE = {}  # user_id: balance
+VERIFIED_IDS = {}  # user_id: amount or None
+PENDING_PROOFS = []  # temporary proofs storage
 
 # ---- START ----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -40,92 +45,94 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---- SUBMIT PROOF ----
 async def submit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Send your proof in this format:\n"
-        "https://t.me/Bot_Tasks_Payment_Bot?start=UserID\n"
-        "Example: https://t.me/Bot_Tasks_Payment_Bot?start=7101602737"
-    )
-    return "PROOF"
+    await update.message.reply_text("📸 Send your screenshot of the proof first:")
+    return PROOF_SCREENSHOT
 
-async def proof_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def proof_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo:
+        await update.message.reply_text("❌ Please send a valid screenshot (photo).")
+        return PROOF_SCREENSHOT
+
+    context.user_data["proof_screenshot"] = update.message.photo[-1].file_id
+    await update.message.reply_text("🔗 Now send the refer link:")
+    return PROOF_LINK
+
+async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     match = re.search(r"start=(\d+)", text)
     if not match:
-        await update.message.reply_text("❌ Invalid proof format.")
-        return "PROOF"
+        await update.message.reply_text("❌ Invalid refer link. Send again.")
+        return PROOF_LINK
 
-    user_id = int(match.group(1))
-    if user_id in VERIFIED_IDS:
-        await update.message.reply_text("❌ Proof rejected (Already Verified).")
-        # Send to admin as record
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"Rejected Proof Record:\nUser ID: {user_id}\nRefer Link: {text}\nReason: Already Verified"
+    refer_id = match.group(1)
+    telegram_user_id = update.effective_user.id
+    proof_status = "❌ REJECTED"
+    amount_added = 0
+
+    # Check verified IDs
+    if refer_id in VERIFIED_IDS:
+        proof_status = "✅ VERIFIED"
+        amt = VERIFIED_IDS[refer_id]
+        if amt:
+            USER_BALANCE[telegram_user_id] = USER_BALANCE.get(telegram_user_id, 0) + amt
+            amount_added = amt
+        del VERIFIED_IDS[refer_id]  # remove used ID
+
+        await update.message.reply_text(
+            f"✅ Proof verified successfully\n"
+            f"Payment/Balance will be added in 5 minutes\n"
+            f"Amount Added: ₹{amount_added}" if amount_added else ""
         )
-        return ConversationHandler.END
-
-    # Auto verification
-    if user_id in VERIFIED_IDS:
-        status = "✅ VERIFIED"
-        USER_BALANCE[update.effective_user.id] = USER_BALANCE.get(update.effective_user.id, 0) + 0
-        VERIFIED_IDS.remove(user_id)
     else:
-        status = "❌ REJECTED"
+        await update.message.reply_text(
+            "❌ Proof rejected due to same device/fake proof/fake refer"
+        )
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Accept", callback_data=f"accept_{user_id}_{text}"),
-         InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}_{text}")]
-    ])
-
-    await context.bot.send_message(
+    # Send proof to admin
+    await context.bot.send_photo(
         ADMIN_ID,
-        f"📥 New Proof\n\nUser ID: {user_id}\nRefer Link: {text}\nStatus: {status}",
-        reply_markup=keyboard
+        photo=context.user_data["proof_screenshot"],
+        caption=(
+            f"📥 Proof Record\n"
+            f"Telegram User ID: {telegram_user_id}\n"
+            f"Refer ID: {refer_id}\n"
+            f"Status: {proof_status}\n"
+            f"Amount Added: ₹{amount_added}"
+        )
     )
-
-    # Instant rejection for users if not valid
-    if status == "❌ REJECTED":
-        await update.message.reply_text("❌ Proof rejected due to fake/same device/fake refer")
-    else:
-        await update.message.reply_text("✅ Proof submitted successfully")
 
     return ConversationHandler.END
 
 # ---- WITHDRAW ----
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Enter withdraw method\nUPI / VSV / FXL")
+    keyboard = ReplyKeyboardMarkup([["UPI", "VSV", "FXL"]], resize_keyboard=True)
+    await update.message.reply_text("Choose withdraw method:", reply_markup=keyboard)
     return WITHDRAW_METHOD
 
 async def withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     method = update.message.text.upper()
     if method not in ["UPI", "VSV", "FXL"]:
-        await update.message.reply_text("Invalid method. Choose UPI / VSV / FXL")
+        await update.message.reply_text("❌ Choose from the buttons (UPI/VSV/FXL).")
         return WITHDRAW_METHOD
 
     context.user_data["method"] = method
-
     if method == "UPI":
-        await update.message.reply_text("Send your verified UPI ID")
+        await update.message.reply_text("Send your verified UPI ID:")
     else:
-        await update.message.reply_text("Send your registered wallet number")
-
+        await update.message.reply_text("Send your registered wallet number:")
     return WITHDRAW_DETAIL
 
 async def withdraw_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["detail"] = update.message.text
-
-    if context.user_data["method"] == "UPI":
-        await update.message.reply_text("Enter amount (Minimum ₹5)")
-    else:
-        await update.message.reply_text("Enter amount (Minimum ₹2)")
-
+    min_amt = 5 if context.user_data["method"] == "UPI" else 2
+    await update.message.reply_text(f"Enter amount (Minimum ₹{min_amt}):")
     return WITHDRAW_AMOUNT
 
 async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = int(update.message.text)
     except:
-        await update.message.reply_text("Enter a valid number")
+        await update.message.reply_text("❌ Enter a valid number")
         return WITHDRAW_AMOUNT
 
     bal = USER_BALANCE.get(update.effective_user.id, 0)
@@ -133,25 +140,20 @@ async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     min_amt = 5 if method == "UPI" else 2
 
     if amount < min_amt:
-        await update.message.reply_text("Amount below minimum limit")
+        await update.message.reply_text("❌ Amount below minimum limit")
         return ConversationHandler.END
-
     if amount > bal:
-        await update.message.reply_text("Insufficient balance")
+        await update.message.reply_text("❌ Insufficient balance")
         return ConversationHandler.END
 
     USER_BALANCE[update.effective_user.id] = bal - amount
-
-    await update.message.reply_text(
-        "Withdraw has been proceeded to owner.\nPayment will be done soon."
-    )
+    await update.message.reply_text("✅ Withdraw request submitted. Payment will be processed soon.")
 
     await context.bot.send_message(
         ADMIN_ID,
-        f"Withdraw Request\n\nUser ID: {update.effective_user.id}\n"
+        f"💸 Withdraw Request\nUser ID: {update.effective_user.id}\n"
         f"Method: {method}\nDetail: {context.user_data['detail']}\nAmount: ₹{amount}"
     )
-
     return ConversationHandler.END
 
 # ---- ADMIN PANEL ----
@@ -167,21 +169,29 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
 
-# ---- CALLBACK HANDLER FOR PROOFS ----
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    # Accept proof
-    if data.startswith("accept_"):
-        _, user_id, link = data.split("_", 2)
-        user_id = int(user_id)
-        USER_BALANCE[user_id] = USER_BALANCE.get(user_id, 0) + 2.5  # Example default
-        VERIFIED_IDS.remove(user_id)
-        await query.edit_message_text(f"✅ Proof Accepted for User ID: {user_id}")
-    elif data.startswith("reject_"):
-        _, user_id, link = data.split("_", 2)
-        await query.edit_message_text(f"❌ Proof Rejected for User ID: {user_id}")
+async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    text = update.message.text.strip()
+    lines = text.splitlines()
+
+    if lines[0].lower().startswith("verified"):
+        # Add Verified IDs with optional amount
+        for line in lines[1:]:
+            parts = line.split()
+            uid = parts[0]
+            amt = float(parts[1]) if len(parts) > 1 else None
+            VERIFIED_IDS[uid] = amt
+        await update.message.reply_text("✅ Verified IDs updated successfully.")
+    elif len(lines[0].split()) == 2:
+        uid, amt = lines[0].split()
+        amt = float(amt)
+        USER_BALANCE[int(uid)] = USER_BALANCE.get(int(uid), 0) + amt
+        await update.message.reply_text(f"✅ Balance added: ₹{amt} to {uid}")
+    elif len(lines[0].split()) == 1:
+        uid = lines[0]
+        USER_BALANCE[int(uid)] = USER_BALANCE.get(int(uid), 0)
+        await update.message.reply_text(f"✅ Balance check/created for {uid}")
 
 # ---- MAIN ----
 def main():
@@ -189,7 +199,10 @@ def main():
 
     proof_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^📤 Submit Proof$"), submit_proof)],
-        states={"PROOF": [MessageHandler(filters.TEXT & ~filters.COMMAND, proof_received)]},
+        states={
+            PROOF_SCREENSHOT: [MessageHandler(filters.PHOTO, proof_screenshot)],
+            PROOF_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, proof_link)]
+        },
         fallbacks=[]
     )
 
@@ -209,9 +222,9 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^🆘 Support$"), support))
     app.add_handler(proof_conv)
     app.add_handler(withdraw_conv)
-    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text))
 
-    # Fix single instance Conflict
+    # Fix single-instance polling
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
