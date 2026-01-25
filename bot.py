@@ -10,9 +10,11 @@ ADMIN_ID = 7112312810
 CHANNEL_LINK = "http://t.me/TaskByZahid"
 
 # ===== STATES =====
-PROOF_SCREENSHOT, PROOF_LINK, PAYMENT_METHOD_FLOW, WITHDRAW_AMOUNT, WITHDRAW_METHOD, WITHDRAW_CONFIRM = range(6)
+PROOF_SCREENSHOT, PROOF_LINK = range(2)
+WITHDRAW_AMOUNT, WITHDRAW_METHOD, WITHDRAW_CONFIRM = range(2, 5)
+PAYMENT_METHOD_FLOW = 5
 
-# ===== USER DATA =====
+# ===== STORAGE =====
 user_data_store = {}  # {user_id: {"balance": 0, "payment": None}}
 
 # ===== BUTTONS =====
@@ -41,7 +43,7 @@ def withdraw_method_buttons():
         ]
     ])
 
-# ===== FORCE JOIN CHECK =====
+# ===== FORCE JOIN =====
 async def check_force_join(user_id, context):
     try:
         member = await context.bot.get_chat_member(CHANNEL_LINK.split("/")[-1], user_id)
@@ -49,9 +51,10 @@ async def check_force_join(user_id, context):
     except:
         return False
 
-# ===== START HANDLER =====
+# ===== START =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
     if not await check_force_join(user_id, context):
         await update.message.reply_text(
             "🚨 **Please Join Our Channel To Access The Bot!** 🚨",
@@ -85,6 +88,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # BUTTONS
     if data == "submit_proof":
         await query.message.reply_text(
             "**Send Screenshot Of Proof With Refer Link Visible**",
@@ -129,7 +133,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("**Operation Cancelled ✅**", reply_markup=main_buttons(), parse_mode="MarkdownV2")
         return ConversationHandler.END
 
-# ===== PROOF FLOW =====
+# ===== PROOF =====
 async def proof_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if not await check_force_join(user_id, context):
@@ -165,7 +169,7 @@ async def proof_refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("**Proof Submitted ✅**", reply_markup=main_buttons(), parse_mode="MarkdownV2")
     return ConversationHandler.END
 
-# ===== PAYMENT METHOD FLOW =====
+# ===== PAYMENT METHOD =====
 async def payment_method_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -175,7 +179,7 @@ async def payment_method_choice(update: Update, context: ContextTypes.DEFAULT_TY
     await query.message.reply_text(f"**Payment Method Saved ✅ ({method})**", reply_markup=main_buttons(), parse_mode="MarkdownV2")
     return ConversationHandler.END
 
-# ===== WITHDRAW FLOW =====
+# ===== WITHDRAW =====
 async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     try:
