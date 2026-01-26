@@ -228,19 +228,27 @@ async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Send to admin
     user_name = users[uid].get("name", "Unknown")
+    
+    # Build caption without nested f-strings
+    caption_lines = [
+        f"📥 New Proof Submission",
+        f"👤 User: {user_name}",
+        f"🆔 ID: {uid}",
+        f"✅ Status: {status}",
+        f"💰 Amount: ₹{added}",
+        f"🔗 Link: {link[:100]}..."
+    ]
+    
+    if verified_id:
+        caption_lines.append(f"🎯 Verified ID: {verified_id}")
+    
+    caption = "\n".join(caption_lines)
+    
     try:
         await context.bot.send_photo(
             ADMIN_ID,
             photo=context.user_data["photo"],
-            caption=(
-                f"📥 New Proof Submission\n"
-                f"👤 User: {user_name}\n"
-                f"🆔 ID: {uid}\n"
-                f"✅ Status: {status}\n"
-                f"💰 Amount: ₹{added}\n"
-                f"🔗 Link: {link[:100]}..."
-                f"{f'\n🎯 Verified ID: {verified_id}' if verified_id else ''}"
-            )
+            caption=caption
         )
     except Exception as e:
         print(f"Error sending to admin: {e}")
@@ -375,16 +383,21 @@ async def wd_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("❌ Reject", callback_data=f"rej:{uid}:{amt}")]
     ])
     
+    # Build message without complex f-strings
+    message_text = (
+        f"💸 New Withdrawal Request\n"
+        f"👤 User: {user_name}\n"
+        f"🆔 ID: {uid}\n"
+        f"💰 Amount: ₹{amt}\n"
+        f"📋 Method: {method}\n"
+        f"🔧 Details: {context.user_data['detail']}\n"
+        f"⏰ Time: {update.message.date}"
+    )
+    
     try:
         await update.get_bot().send_message(
             ADMIN_ID,
-            f"💸 New Withdrawal Request\n"
-            f"👤 User: {user_name}\n"
-            f"🆔 ID: {uid}\n"
-            f"💰 Amount: ₹{amt}\n"
-            f"📋 Method: {method}\n"
-            f"🔧 Details: {context.user_data['detail']}\n"
-            f"⏰ Time: {update.message.date}",
+            message_text,
             reply_markup=kb
         )
     except Exception as e:
@@ -426,12 +439,12 @@ async def wd_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if action == "done":
         # Withdrawal approved
-        await context.bot.send_message(
-            int(uid),
+        message_to_user = (
             f"✅ Withdrawal Approved!\n"
             f"💰 ₹{amount} has been processed.\n"
             f"Thank you for using our service!"
         )
+        await context.bot.send_message(int(uid), message_to_user)
         await query.edit_message_text(f"✅ Withdrawal approved for user {uid}")
         
     elif action == "rej":
@@ -441,13 +454,13 @@ async def wd_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             users[uid]["balance"] += amount
             save(USERS, users)
         
-        await context.bot.send_message(
-            int(uid),
+        message_to_user = (
             f"❌ Withdrawal Rejected\n"
             f"💰 ₹{amount} has been refunded to your balance.\n"
             f"Reason: Invalid details or system issue\n"
             f"Contact support if you need help."
         )
+        await context.bot.send_message(int(uid), message_to_user)
         await query.edit_message_text(f"❌ Withdrawal rejected for user {uid}")
 
 # ================= ADMIN COMMANDS =================
@@ -511,13 +524,15 @@ async def total_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_balance = sum(user.get("balance", 0) for user in users.values())
     total_proofs = sum(user.get("proofs", 0) for user in users.values())
     
-    await update.message.reply_text(
+    message_text = (
         f"📊 Statistics:\n\n"
         f"👥 Total Users: {len(users)}\n"
         f"💰 Total Balance: ₹{total_balance}\n"
         f"📥 Total Proofs: {total_proofs}\n"
         f"✅ Verified IDs: {len(load(VERIFIED, {}))}"
     )
+    
+    await update.message.reply_text(message_text)
 
 async def user_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get details of a specific user"""
