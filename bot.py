@@ -1,199 +1,184 @@
-import os, json
-from telegram import Update, ReplyKeyboardMarkup
+import os, json, re, requests
+from telegram import (
+    Update, ReplyKeyboardMarkup,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ConversationHandler, ContextTypes, filters
+    ApplicationBuilder, CommandHandler,
+    MessageHandler, ConversationHandler,
+    CallbackQueryHandler, ContextTypes, filters
 )
 
+# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+FORCE_JOIN_CHANNEL = "@TaskByZahid"
 
 DATA = "data"
-os.makedirs(DATA, exist_ok=True)
-
 USERS = f"{DATA}/users.json"
 VERIFIED = f"{DATA}/verified.json"
+SETTINGS = f"{DATA}/settings.json"
+os.makedirs(DATA, exist_ok=True)
 
-# ---------- utils ----------
-def load(path, default):
-    if not os.path.exists(path):
-        with open(path, "w") as f:
-            json.dump(default, f)
-    with open(path) as f:
-        return json.load(f)
+# ================= STATES =================
+(
+    PROOF_SCREEN, PROOF_LINK,
+    WD_METHOD, WD_DETAIL, WD_AMOUNT,
+    ADD_VER
+) = range(6)
 
-def save(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+# ================= DEFAULT SETTINGS =================
+DEFAULT_SETTINGS = {
+    "VSV": {"enabled": False, "api": ""},
+    "FXL": {"enabled": False, "api": ""}
+}
 
-def ensure_user(uid):
-    users = load(USERS, {})
-    users.setdefault(uid, {"balance": 0, "proofs": 0})
-    save(USERS, users)
-    return users
+# ================= UTILS =================
+def load(p, d):
+    if not os.path.exists(p):
+        with open(p, "w") as f: json.dump(d, f)
+    with open(p) as f: return json.load(f)
 
-MAIN_MENU = ReplyKeyboardMarkup(
-    [["📤 Submit Proof"],
-     ["💰 Balance", "💸 Withdraw"],
-     ["🆘 Support"]],
-    resize_keyboard=True
-)
+def save(p, d):
+    with open(p, "w") as f: json.dump(d, f, indent=2)
 
-CANCEL = ReplyKeyboardMarkup([["❌ Cancel"]], resize_keyboard=True)
-
-# ---------- states ----------
-PROOF_SS, PROOF_LINK, WD_METHOD, WD_DETAIL, WD_AMOUNT = range(5)
-
-# ---------- start ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ensure_user(str(update.effective_user.id))
-    context.user_data.clear()
-    await update.message.reply_text("👋 Welcome to Task Bot", reply_markup=MAIN_MENU)
-
-# ---------- cancel ----------
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("❌ Cancelled", reply_markup=MAIN_MENU)
-    return ConversationHandler.END
-
-# ---------- support ----------
-async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "If you face any issue,\nContact Owner: @DTXZAHID",
-        reply_markup=MAIN_MENU
-    )
-
-# ---------- balance ----------
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    users = ensure_user(uid)
-    await update.message.reply_text(f"💰 Balance: ₹{users[uid]['balance']}")
-
-# ---------- submit proof ----------
-async def submit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📸 Send Screenshot", reply_markup=CANCEL)
-    return PROOF_SS
-
-async def proof_ss(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo:
-        return PROOF_SS
-    context.user_data["photo"] = update.message.photo[-1].file_id
-    await update.message.reply_text("🔗 Send refer link")
-    return PROOF_LINK
-
-async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    ensure_user(uid)
-
-    verified = load(VERIFIED, {})
-    users = load(USERS, {})
-
-    added = 0
-    status = "REJECTED"
-
-    for vid, amt in list(verified.items()):
-        if vid in update.message.text:
-            status = "VERIFIED"
-            added = float(amt)
-            users[uid]["balance"] += added
-            users[uid]["proofs"] += 1
-            del verified[vid]
-            break
-
-    save(USERS, users)
-    save(VERIFIED, verified)
-
-    await context.bot.send_photo(
-        ADMIN_ID,
-        context.user_data["photo"],
-        caption=f"Proof from {uid}\nStatus: {status}\nAmount: ₹{added}"
-    )
-
-    await update.message.reply_text(
-        "✅ Proof verified" if status == "VERIFIED" else "❌ Proof rejected",
-        reply_markup=MAIN_MENU
-    )
-    return ConversationHandler.END
-
-# ---------- withdraw ----------
-async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("in_withdraw"):
-        return
-    context.user_data["in_withdraw"] = True
-
-    ensure_user(str(update.effective_user.id))
-    kb = ReplyKeyboardMarkup(
-        [["UPI", "VSV", "FXL"], ["❌ Cancel"]],
+def menu():
+    return ReplyKeyboardMarkup(
+        [["📤 Submit Proof"],
+         ["💰 Balance", "💸 Withdraw"],
+         ["🆘 Support"]],
         resize_keyboard=True
     )
-    await update.message.reply_text("Select withdraw method", reply_markup=kb)
+
+def admin_menu():
+    return ReplyKeyboardMarkup(
+        [["➕ Add Verified ID"],
+         ["⚙ Auto Withdraw Settings"],
+         ["👥 Total Users"]],
+        resize_keyboard=True
+    )
+
+# ================= START =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    users = load(USERS, {})
+    uid = str(update.effective_user.id)
+    users.setdefault(uid, {"balance": 0, "proofs": 0})
+    save(USERS, users)
+    await update.message.reply_text("👋 Welcome to Task Bot", reply_markup=menu())
+
+# ================= BALANCE =================
+async def balance(update, context):
+    bal = load(USERS, {})[str(update.effective_user.id)]["balance"]
+    await update.message.reply_text(f"💰 Your Balance: ₹{bal}")
+
+# ================= SUPPORT =================
+async def support(update, context):
+    await update.message.reply_text("🆘 Contact Owner: @DTXZAHID")
+
+# ================= WITHDRAW =================
+async def withdraw(update, context):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("UPI", callback_data="upi"),
+         InlineKeyboardButton("VSV", callback_data="vsv"),
+         InlineKeyboardButton("FXL", callback_data="fxl")]
+    ])
+    await update.message.reply_text("💸 Select withdraw method", reply_markup=kb)
     return WD_METHOD
 
-async def wd_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text not in ["UPI", "VSV", "FXL"]:
-        return WD_METHOD
-    context.user_data["method"] = update.message.text
-    await update.message.reply_text(
-        "Send UPI ID" if update.message.text == "UPI" else "Send registered number",
-        reply_markup=CANCEL
-    )
+async def wd_method(update, context):
+    q = update.callback_query; await q.answer()
+    context.user_data["method"] = q.data.upper()
+    await q.message.reply_text("Send UPI ID / Registered Number")
     return WD_DETAIL
 
-async def wd_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["detail"] = update.message.text
-    await update.message.reply_text("Enter amount")
+async def wd_detail(update, context):
+    context.user_data["detail"] = update.message.text.strip()
+    await update.message.reply_text("Enter amount (Minimum ₹5)")
     return WD_AMOUNT
 
-async def wd_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    users = ensure_user(uid)
-
-    if not update.message.text.isdigit():
+async def wd_amount(update, context):
+    if not re.fullmatch(r"\d+", update.message.text):
+        await update.message.reply_text("❌ Enter numbers only")
         return WD_AMOUNT
 
     amt = int(update.message.text)
-    min_amt = 5 if context.user_data["method"] == "UPI" else 2
+    uid = str(update.effective_user.id)
+    users = load(USERS, {})
+    bal = users[uid]["balance"]
 
-    if amt < min_amt or users[uid]["balance"] < amt:
-        context.user_data.clear()
-        await update.message.reply_text("❌ Invalid amount", reply_markup=MAIN_MENU)
+    if amt < 5:
+        await update.message.reply_text("❌ Minimum withdraw is ₹5")
         return ConversationHandler.END
+
+    if bal < amt:
+        await update.message.reply_text("❌ Insufficient balance")
+        return ConversationHandler.END
+
+    method = context.user_data["method"]
+    settings = load(SETTINGS, DEFAULT_SETTINGS)
 
     users[uid]["balance"] -= amt
     save(USERS, users)
 
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"Withdraw Request\nUser: {uid}\nAmount: ₹{amt}\nMethod: {context.user_data['method']}"
-    )
+    # AUTO WITHDRAW
+    if method in ("VSV", "FXL") and settings[method]["enabled"]:
+        await update.message.reply_text("⏳ Processing automatic withdraw...")
+        # 🔴 REAL API CALL GOES HERE (safe placeholder)
+        # response = requests.post(settings[method]["api"], data={...})
+        await update.message.reply_text("✅ Withdraw successful (Auto)")
+    else:
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"💸 Withdraw Request\nUser: {uid}\n₹{amt}\nMethod: {method}\nDetail: {context.user_data['detail']}"
+        )
+        await update.message.reply_text("✅ Withdraw request sent")
 
-    context.user_data.clear()
-    await update.message.reply_text("✅ Withdraw request sent", reply_markup=MAIN_MENU)
     return ConversationHandler.END
 
-# ---------- main ----------
+# ================= ADMIN =================
+async def admin(update, context):
+    if update.effective_user.id != ADMIN_ID: return
+    await update.message.reply_text("⚙ Admin Panel", reply_markup=admin_menu())
+
+async def auto_settings(update, context):
+    s = load(SETTINGS, DEFAULT_SETTINGS)
+    await update.message.reply_text(
+        f"⚙ Auto Withdraw\n"
+        f"VSV: {'ON' if s['VSV']['enabled'] else 'OFF'}\n"
+        f"FXL: {'ON' if s['FXL']['enabled'] else 'OFF'}\n\n"
+        f"Send:\nVSV ON api_link\nFXL OFF"
+    )
+
+async def set_auto(update, context):
+    s = load(SETTINGS, DEFAULT_SETTINGS)
+    p = update.message.text.split(maxsplit=2)
+    if len(p) >= 2:
+        key = p[0].upper()
+        s[key]["enabled"] = p[1].upper() == "ON"
+        if len(p) == 3:
+            s[key]["api"] = p[2]
+        save(SETTINGS, s)
+        await update.message.reply_text("✅ Updated")
+
+# ================= MAIN =================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex("^🆘 Support$"), support))
+    app.add_handler(CommandHandler("admin", admin))
     app.add_handler(MessageHandler(filters.Regex("^💰 Balance$"), balance))
+    app.add_handler(MessageHandler(filters.Regex("^🆘 Support$"), support))
+    app.add_handler(MessageHandler(filters.Regex("^⚙ Auto Withdraw Settings$"), auto_settings))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^(VSV|FXL)"), set_auto))
 
     app.add_handler(ConversationHandler(
-        [MessageHandler(filters.Regex("^📤 Submit Proof$"), submit_proof)],
-        {PROOF_SS: [MessageHandler(filters.PHOTO, proof_ss)],
-         PROOF_LINK: [MessageHandler(filters.TEXT, proof_link)]},
-        [MessageHandler(filters.Regex("^❌ Cancel$"), cancel)]
-    ))
-
-    app.add_handler(ConversationHandler(
-        [MessageHandler(filters.Regex("^💸 Withdraw$"), withdraw)],
-        {
-            WD_METHOD: [MessageHandler(filters.TEXT, wd_method)],
+        entry_points=[MessageHandler(filters.Regex("^💸 Withdraw$"), withdraw)],
+        states={
+            WD_METHOD: [CallbackQueryHandler(wd_method)],
             WD_DETAIL: [MessageHandler(filters.TEXT, wd_detail)],
-            WD_AMOUNT: [MessageHandler(filters.TEXT, wd_amount)],
+            WD_AMOUNT: [MessageHandler(filters.TEXT, wd_amount)]
         },
-        [MessageHandler(filters.Regex("^❌ Cancel$"), cancel)]
+        fallbacks=[]
     ))
 
     app.run_polling()
