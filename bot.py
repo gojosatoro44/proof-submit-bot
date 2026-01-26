@@ -1,4 +1,4 @@
-import os, json, re, requests
+import os, json
 from telegram import (
     Update, ReplyKeyboardMarkup,
     InlineKeyboardMarkup, InlineKeyboardButton
@@ -17,21 +17,14 @@ FORCE_JOIN_CHANNEL = "@TaskByZahid"
 DATA = "data"
 USERS = f"{DATA}/users.json"
 VERIFIED = f"{DATA}/verified.json"
-SETTINGS = f"{DATA}/settings.json"
 os.makedirs(DATA, exist_ok=True)
 
 # ================= STATES =================
 (
     PROOF_SCREEN, PROOF_LINK,
     WD_METHOD, WD_DETAIL, WD_AMOUNT,
-    ADD_VER
-) = range(6)
-
-# ================= DEFAULT SETTINGS =================
-DEFAULT_SETTINGS = {
-    "VSV": {"enabled": False, "api": ""},
-    "FXL": {"enabled": False, "api": ""}
-}
+    ADD_BAL, REM_BAL, ADD_VER, CHECK_USER
+) = range(9)
 
 # ================= UTILS =================
 def load(p, d):
@@ -50,115 +43,209 @@ def menu():
         resize_keyboard=True
     )
 
-def admin_menu():
-    return ReplyKeyboardMarkup(
-        [["➕ Add Verified ID"],
-         ["⚙ Auto Withdraw Settings"],
-         ["👥 Total Users"]],
-        resize_keyboard=True
-    )
+async def force_join(update):
+    try:
+        m = await update.get_bot().get_chat_member(
+            FORCE_JOIN_CHANNEL, update.effective_user.id
+        )
+        return m.status in ("member", "administrator", "creator")
+    except:
+        return False
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await force_join(update):
+        btn = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("✅ Join Channel", url=f"https://t.me/{FORCE_JOIN_CHANNEL[1:]}")]]
+        )
+        await update.message.reply_text(
+            "🚫 You must join the channel to use this bot.",
+            reply_markup=btn
+        )
+        return
+
     users = load(USERS, {})
     uid = str(update.effective_user.id)
     users.setdefault(uid, {"balance": 0, "proofs": 0})
     save(USERS, users)
-    await update.message.reply_text("👋 Welcome to Task Bot", reply_markup=menu())
+
+    await update.message.reply_text(
+        "👋 Welcome to Task Bot",
+        reply_markup=menu()
+    )
 
 # ================= BALANCE =================
-async def balance(update, context):
-    bal = load(USERS, {})[str(update.effective_user.id)]["balance"]
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = load(USERS, {})
+    bal = u[str(update.effective_user.id)]["balance"]
     await update.message.reply_text(f"💰 Your Balance: ₹{bal}")
 
 # ================= SUPPORT =================
-async def support(update, context):
-    await update.message.reply_text("🆘 Contact Owner: @DTXZAHID")
+async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🆘 Need help?\nContact owner: @DTXZAHID"
+    )
+
+# ================= SUBMIT PROOF =================
+async def submit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📸 Send screenshot proof")
+    return PROOF_SCREEN
+
+async def proof_screen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo:
+        await update.message.reply_text("❌ Screenshot only")
+        return PROOF_SCREEN
+    context.user_data["photo"] = update.message.photo[-1].file_id
+    await update.message.reply_text("🔗 Now send refer link")
+    return PROOF_LINK
+
+async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    link = update.message.text
+    uid = str(update.effective_user.id)
+
+    verified = load(VERIFIED, {})
+    users = load(USERS, {})
+
+    status = "REJECTED"
+    added = 0
+
+    for vid, amt in verified.items():
+        if vid in link:
+            status = "VERIFIED"
+            if amt > 0:
+                users[uid]["balance"] += amt
+                added = amt
+            users[uid]["proofs"] += 1
+            del verified[vid]
+            break
+
+    save(USERS, users)
+    save(VERIFIED, verified)
+
+    await context.bot.send_photo(
+        ADMIN_ID,
+        context.user_data["photo"],
+        caption=(
+            f"📥 Proof\n"
+            f"User: {uid}\n"
+            f"Status: {status}\n"
+            f"Amount: ₹{added}\n"
+            f"Link: {link}"
+        )
+    )
+
+    if status == "VERIFIED" and added == 0:
+        msg = "✅ Proof verified\n💰 Payment will be added in 5–10 minutes"
+    elif status == "VERIFIED":
+        msg = f"✅ Proof verified\n₹{added} added to balance"
+    else:
+        msg = "❌ Proof rejected (Fake / Same device / Refer mismatch)"
+
+    await update.message.reply_text(msg, reply_markup=menu())
+    return ConversationHandler.END
 
 # ================= WITHDRAW =================
-async def withdraw(update, context):
+async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("UPI", callback_data="upi"),
          InlineKeyboardButton("VSV", callback_data="vsv"),
-         InlineKeyboardButton("FXL", callback_data="fxl")]
+         InlineKeyboardButton("FXL", callback_data="fxl")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ])
-    await update.message.reply_text("💸 Select withdraw method", reply_markup=kb)
+    await update.message.reply_text("💸 Choose withdraw method", reply_markup=kb)
     return WD_METHOD
 
-async def wd_method(update, context):
+async def wd_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
+    if q.data == "cancel":
+        await q.message.reply_text("❌ Cancelled", reply_markup=menu())
+        return ConversationHandler.END
+
     context.user_data["method"] = q.data.upper()
-    await q.message.reply_text("Send UPI ID / Registered Number")
+    await q.message.reply_text(
+        "Send UPI ID" if q.data == "upi" else "Send registered number"
+    )
     return WD_DETAIL
 
-async def wd_detail(update, context):
-    context.user_data["detail"] = update.message.text.strip()
-    await update.message.reply_text("Enter amount (Minimum ₹5)")
+async def wd_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["detail"] = update.message.text
+    min_amt = 5 if context.user_data["method"] == "UPI" else 2
+    await update.message.reply_text(
+        f"Enter amount (Min ₹{min_amt})"
+    )
     return WD_AMOUNT
 
-async def wd_amount(update, context):
-    if not re.fullmatch(r"\d+", update.message.text):
-        await update.message.reply_text("❌ Enter numbers only")
+async def wd_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.text.isdigit():
+        await update.message.reply_text("❌ Numbers only")
         return WD_AMOUNT
 
     amt = int(update.message.text)
-    uid = str(update.effective_user.id)
-    users = load(USERS, {})
-    bal = users[uid]["balance"]
-
-    if amt < 5:
-        await update.message.reply_text("❌ Minimum withdraw is ₹5")
-        return ConversationHandler.END
-
-    if bal < amt:
-        await update.message.reply_text("❌ Insufficient balance")
-        return ConversationHandler.END
-
     method = context.user_data["method"]
-    settings = load(SETTINGS, DEFAULT_SETTINGS)
+    min_amt = 5 if method == "UPI" else 2
+
+    users = load(USERS, {})
+    uid = str(update.effective_user.id)
+
+    if amt < min_amt or users[uid]["balance"] < amt:
+        await update.message.reply_text("❌ Invalid amount")
+        return ConversationHandler.END
 
     users[uid]["balance"] -= amt
     save(USERS, users)
 
-    # AUTO WITHDRAW
-    if method in ("VSV", "FXL") and settings[method]["enabled"]:
-        await update.message.reply_text("⏳ Processing automatic withdraw...")
-        # 🔴 REAL API CALL GOES HERE (safe placeholder)
-        # response = requests.post(settings[method]["api"], data={...})
-        await update.message.reply_text("✅ Withdraw successful (Auto)")
-    else:
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"💸 Withdraw Request\nUser: {uid}\n₹{amt}\nMethod: {method}\nDetail: {context.user_data['detail']}"
-        )
-        await update.message.reply_text("✅ Withdraw request sent")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Withdraw Done", callback_data=f"done:{uid}:{amt}"),
+         InlineKeyboardButton("❌ Withdraw Rejected", callback_data=f"rej:{uid}")]
+    ])
 
-    return ConversationHandler.END
-
-# ================= ADMIN =================
-async def admin(update, context):
-    if update.effective_user.id != ADMIN_ID: return
-    await update.message.reply_text("⚙ Admin Panel", reply_markup=admin_menu())
-
-async def auto_settings(update, context):
-    s = load(SETTINGS, DEFAULT_SETTINGS)
-    await update.message.reply_text(
-        f"⚙ Auto Withdraw\n"
-        f"VSV: {'ON' if s['VSV']['enabled'] else 'OFF'}\n"
-        f"FXL: {'ON' if s['FXL']['enabled'] else 'OFF'}\n\n"
-        f"Send:\nVSV ON api_link\nFXL OFF"
+    await context.bot.send_message(
+        ADMIN_ID,
+        f"💸 Withdraw Request\nUser: {uid}\nAmount: ₹{amt}\nMethod: {method}\nDetail: {context.user_data['detail']}",
+        reply_markup=kb
     )
 
-async def set_auto(update, context):
-    s = load(SETTINGS, DEFAULT_SETTINGS)
-    p = update.message.text.split(maxsplit=2)
-    if len(p) >= 2:
-        key = p[0].upper()
-        s[key]["enabled"] = p[1].upper() == "ON"
-        if len(p) == 3:
-            s[key]["api"] = p[2]
-        save(SETTINGS, s)
-        await update.message.reply_text("✅ Updated")
+    await update.message.reply_text("✅ Withdraw request sent", reply_markup=menu())
+    return ConversationHandler.END
+
+async def wd_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    act, uid, *_ = q.data.split(":")
+    msg = (
+        "✅ Withdraw processed successfully"
+        if act == "done"
+        else "❌ Withdraw rejected due to issues"
+    )
+    await context.bot.send_message(int(uid), msg)
+    await q.message.edit_text("✔ Action completed")
+
+# ================= ADMIN =================
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    kb = ReplyKeyboardMarkup(
+        [["➕ Add Balance", "➖ Remove Balance"],
+         ["📋 Verified IDs", "👥 Total Users"],
+         ["🔍 Check Detail"]],
+        resize_keyboard=True
+    )
+    await update.message.reply_text("⚙ Admin Panel", reply_markup=kb)
+
+async def add_ver(update, context):
+    await update.message.reply_text("Send: USER_ID or USER_ID AMOUNT")
+    return ADD_VER
+
+async def add_ver_do(update, context):
+    p = update.message.text.split()
+    v = load(VERIFIED, {})
+    v[p[0]] = float(p[1]) if len(p) == 2 else 0
+    save(VERIFIED, v)
+    await update.message.reply_text("✅ Verified ID saved")
+    return ConversationHandler.END
+
+async def total_users(update, context):
+    await update.message.reply_text(
+        f"👥 Total Users: {len(load(USERS, {}))}"
+    )
 
 # ================= MAIN =================
 def main():
@@ -168,8 +255,16 @@ def main():
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(MessageHandler(filters.Regex("^💰 Balance$"), balance))
     app.add_handler(MessageHandler(filters.Regex("^🆘 Support$"), support))
-    app.add_handler(MessageHandler(filters.Regex("^⚙ Auto Withdraw Settings$"), auto_settings))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^(VSV|FXL)"), set_auto))
+    app.add_handler(MessageHandler(filters.Regex("^👥 Total Users$"), total_users))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📤 Submit Proof$"), submit_proof)],
+        states={
+            PROOF_SCREEN: [MessageHandler(filters.PHOTO, proof_screen)],
+            PROOF_LINK: [MessageHandler(filters.TEXT, proof_link)]
+        },
+        fallbacks=[]
+    ))
 
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^💸 Withdraw$"), withdraw)],
@@ -178,6 +273,14 @@ def main():
             WD_DETAIL: [MessageHandler(filters.TEXT, wd_detail)],
             WD_AMOUNT: [MessageHandler(filters.TEXT, wd_amount)]
         },
+        fallbacks=[]
+    ))
+
+    app.add_handler(CallbackQueryHandler(wd_action, pattern="^(done|rej):"))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📋 Verified IDs$"), add_ver)],
+        states={ADD_VER: [MessageHandler(filters.TEXT, add_ver_do)]},
         fallbacks=[]
     ))
 
