@@ -1,6 +1,6 @@
-
 import os, json
 import threading
+import re
 from telegram import (
     Update, ReplyKeyboardMarkup,
     InlineKeyboardMarkup, InlineKeyboardButton
@@ -78,6 +78,47 @@ async def force_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
+def is_valid_url(url):
+    """
+    Check if the input is a valid URL.
+    Supports http, https, and common app referral links.
+    """
+    url = url.strip()
+    
+    # Common URL patterns
+    url_patterns = [
+        r'^https?://',  # http:// or https://
+        r'^www\.',      # www.domain.com
+        r'^[a-zA-Z0-9]+://',  # protocol://
+    ]
+    
+    # Check if it matches any URL pattern
+    for pattern in url_patterns:
+        if re.search(pattern, url, re.IGNORECASE):
+            return True
+    
+    # Check for common referral link patterns
+    referral_patterns = [
+        r'^[a-zA-Z0-9]{8,}$',  # Short codes (at least 8 chars)
+        r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$',  # Email format
+        r'^[a-zA-Z0-9]+=[a-zA-Z0-9]+',  # key=value format
+        r'^ref/[a-zA-Z0-9]+',  # ref/CODE format
+        r'^invite/[a-zA-Z0-9]+',  # invite/CODE format
+        r'^[a-zA-Z0-9]{5,}/[a-zA-Z0-9]{5,}',  # code1/code2 format
+    ]
+    
+    for pattern in referral_patterns:
+        if re.fullmatch(pattern, url, re.IGNORECASE):
+            return True
+    
+    # Check if it contains common domain words (for user-friendly messages)
+    domain_words = ['.com', '.in', '.org', '.net', '.co', '.io', '.me', '.app']
+    for word in domain_words:
+        if word in url.lower():
+            return True
+    
+    return False
+
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await force_join(update, context):
@@ -148,12 +189,37 @@ async def submit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Join channel first using /start")
         return ConversationHandler.END
     
-    await update.message.reply_text("🔗 Send your referral link:")
+    await update.message.reply_text(
+        "Bro Apna Refer Link Bhejo/Send Your Refer Link\n"
+        "E.g https://t.me/xxxxxxxxxx?start=123456789\n\n"
+        "Examples of valid links:\n"
+        "• https://example.com/invite/abc123\n"
+        "• www.example.com/ref=user123\n"
+        "• referral codes like: ABC123DEF456\n"
+        "• Email format: user@example.com\n"
+        "• Short codes: ref123456\n\n"
+        "⚠️ Make sure it's a valid referral/invite link!"
+    )
     return PROOF_LINK
 
 async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = update.message.text.strip()
     uid = str(update.effective_user.id)
+    
+    # Validate the link
+    if not is_valid_url(link):
+        await update.message.reply_text(
+            "❌ Invalid link format!\n\n"
+            "Please send a valid referral link.\n"
+            "Example: https://t.me/xxxxxxxxxx?start=123456789\n\n"
+            "It should look like one of these:\n"
+            "• Full URL: https://app.com/invite/CODE\n"
+            "• Short URL: app.com/CODE\n"
+            "• Referral code: ABC123XYZ\n"
+            "• Email format: yourname@domain.com\n\n"
+            "Please check and send again:"
+        )
+        return PROOF_LINK
     
     # Load all data
     verified = load(VERIFIED, [])
@@ -204,7 +270,7 @@ async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 {uid}\n"
             f"✅ {status}\n"
             f"💰 +₹{added}\n"
-            f"🔗 {link}"
+            f"🔗 {link[:100]}{'...' if len(link) > 100 else ''}"
         )
     except:
         pass
