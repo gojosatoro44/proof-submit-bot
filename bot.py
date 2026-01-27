@@ -190,15 +190,9 @@ async def submit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     
     await update.message.reply_text(
-        "Bro Apna Refer Link Bhejo/Send Your Refer Link\n"
-        "E.g https://t.me/xxxxxxxxxx?start=123456789\n\n"
-        "Examples of valid links:\n"
-        "• https://example.com/invite/abc123\n"
-        "• www.example.com/ref=user123\n"
-        "• referral codes like: ABC123DEF456\n"
-        "• Email format: user@example.com\n"
-        "• Short codes: ref123456\n\n"
-        "⚠️ Make sure it's a valid referral/invite link!"
+        "Bro Send Your Refer Link/Bhai Apna Refer Link Bhejo!\n"
+        "\n"
+        "[Example:-https://t.me/Abc?start=123456789]"
     )
     return PROOF_LINK
 
@@ -211,13 +205,7 @@ async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ Invalid link format!\n\n"
             "Please send a valid referral link.\n"
-            "Example: https://t.me/xxxxxxxxxx?start=123456789\n\n"
-            "It should look like one of these:\n"
-            "• Full URL: https://app.com/invite/CODE\n"
-            "• Short URL: app.com/CODE\n"
-            "• Referral code: ABC123XYZ\n"
-            "• Email format: yourname@domain.com\n\n"
-            "Please check and send again:"
+            "Example: https://t.me/Abc?start=123456789"
         )
         return PROOF_LINK
     
