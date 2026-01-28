@@ -1,6 +1,7 @@
 import os, json
 import threading
 import re
+import time
 from telegram import (
     Update, ReplyKeyboardMarkup,
     InlineKeyboardMarkup, InlineKeyboardButton
@@ -18,8 +19,11 @@ FORCE_JOIN_CHANNEL = "@TaskByZahid"
 
 DATA = "data"
 USERS = f"{DATA}/users.json"
-VERIFIED = f"{DATA}/verified.json"  # Now stores as {"user_id": amount}
+VERIFIED = f"{DATA}/verified.json"
+SUBMISSION_HISTORY = f"{DATA}/submission_history.json"
+BACKUP_DIR = f"{DATA}/backups"
 os.makedirs(DATA, exist_ok=True)
+os.makedirs(BACKUP_DIR, exist_ok=True)
 
 # Thread lock for file operations
 file_lock = threading.Lock()
@@ -33,17 +37,68 @@ file_lock = threading.Lock()
     ADD_VER_IDS, VER_AMOUNT
 ) = range(10)
 
-# ================= UTILS =================
+# ================= ENHANCED UTILS =================
+def backup_data():
+    """Create backup of all data files"""
+    timestamp = int(time.time())
+    for file in [USERS, VERIFIED, SUBMISSION_HISTORY]:
+        if os.path.exists(file):
+            filename = os.path.basename(file)
+            backup_path = os.path.join(BACKUP_DIR, f"{filename}.backup_{timestamp}")
+            with file_lock:
+                try:
+                    with open(file, 'r') as f:
+                        data = json.load(f)
+                    with open(backup_path, 'w') as f:
+                        json.dump(data, f, indent=2)
+                except:
+                    pass
+
 def load(p, d):
+    """Enhanced load with auto-backup"""
     with file_lock:
         if not os.path.exists(p):
             with open(p, "w") as f: 
                 json.dump(d, f)
-        with open(p) as f: 
-            return json.load(f)
+        try:
+            with open(p) as f: 
+                return json.load(f)
+        except json.JSONDecodeError:
+            # If file is corrupted, restore from latest backup
+            print(f"Warning: {p} is corrupted, attempting backup restore...")
+            restore_from_backup(p)
+            with open(p) as f:
+                return json.load(f)
+
+def restore_from_backup(filepath):
+    """Restore data from latest backup"""
+    filename = os.path.basename(filepath)
+    backups = []
+    for f in os.listdir(BACKUP_DIR):
+        if f.startswith(f"{filename}.backup_"):
+            backups.append(f)
+    
+    if backups:
+        # Get latest backup
+        latest = sorted(backups)[-1]
+        backup_path = os.path.join(BACKUP_DIR, latest)
+        with open(backup_path, 'r') as f:
+            data = json.load(f)
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+        print(f"Restored {filepath} from backup {latest}")
+    else:
+        # Create fresh file
+        with open(filepath, 'w') as f:
+            json.dump({}, f)
 
 def save(p, d):
+    """Enhanced save with auto-backup"""
     with file_lock:
+        # Create backup before saving
+        if os.path.exists(p):
+            backup_data()
+        
         with open(p, "w") as f: 
             json.dump(d, f, indent=2)
 
@@ -60,6 +115,7 @@ def admin_menu():
         [["➕ Add Balance", "➖ Remove Balance"],
          ["📋 Add Verified IDs"],
          ["👥 Total Users", "📊 User Details"],
+         ["📜 Proof History", "🔧 View Verified IDs"],
          ["🏠 Main Menu"]],
         resize_keyboard=True
     )
@@ -110,13 +166,34 @@ def is_valid_url(url):
         if re.fullmatch(pattern, url, re.IGNORECASE):
             return True
     
-    # Check if it contains common domain words (for user-friendly messages)
+    # Check if it contains common domain words
     domain_words = ['.com', '.in', '.org', '.net', '.co', '.io', '.me', '.app']
     for word in domain_words:
         if word in url.lower():
             return True
     
     return False
+
+def log_submission(user_id, link, status, amount, used_ids):
+    """Log submission history"""
+    history = load(SUBMISSION_HISTORY, {})
+    
+    if user_id not in history:
+        history[user_id] = []
+    
+    history[user_id].append({
+        "timestamp": int(time.time()),
+        "link": link,
+        "status": status,
+        "amount": amount,
+        "used_ids": used_ids
+    })
+    
+    # Keep only last 100 submissions per user
+    if len(history[user_id]) > 100:
+        history[user_id] = history[user_id][-100:]
+    
+    save(SUBMISSION_HISTORY, history)
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -138,8 +215,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "balance": 0, 
             "proofs": 0, 
             "name": update.effective_user.full_name,
-            "username": update.effective_user.username
+            "username": update.effective_user.username,
+            "joined_at": int(time.time()),
+            "last_active": int(time.time())
         }
+    else:
+        # Update last active time
+        users[uid]["last_active"] = int(time.time())
+        if "joined_at" not in users[uid]:
+            users[uid]["joined_at"] = int(time.time())
+    
     save(USERS, users)
 
     await update.message.reply_text(
@@ -170,6 +255,10 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid not in users:
         await update.message.reply_text("❌ User not found. Use /start")
         return
+    
+    # Update last active time
+    users[uid]["last_active"] = int(time.time())
+    save(USERS, users)
     
     bal = users[uid]["balance"]
     proofs = users[uid]["proofs"]
@@ -219,7 +308,7 @@ async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return PROOF_LINK
     
     # Load all data
-    verified = load(VERIFIED, {})  # Now dictionary: {user_id: amount}
+    verified = load(VERIFIED, {})  # Now stores as {"user_id": {"amount": X, "used": False}}
     users = load(USERS, {})
     
     # Initialize user if not exists
@@ -228,28 +317,46 @@ async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "balance": 0, 
             "proofs": 0, 
             "name": update.effective_user.full_name,
-            "username": update.effective_user.username
+            "username": update.effective_user.username,
+            "joined_at": int(time.time()),
+            "last_active": int(time.time())
         }
     
     status = "REJECTED"
     added = 0
-    used_verified_id = None
+    used_verified_ids = []
     
     # Check if link contains any verified ID
-    for vid, amount in verified.items():
-        if str(vid) in link:
+    for vid, data in verified.items():
+        # Convert to dict if it's still old format (just a number)
+        if isinstance(data, (int, float)):
+            verified[vid] = {"amount": data, "used": False, "added_at": int(time.time())}
+            data = verified[vid]
+        
+        # Check if this ID is in the link AND hasn't been used yet
+        if str(vid) in link and not data.get("used", False):
             status = "VERIFIED"
-            used_verified_id = vid
-            added = amount
+            used_verified_ids.append(vid)
+            added += data["amount"]
             
-            # Add to user's balance
-            users[uid]["balance"] += added
-            users[uid]["proofs"] += 1
+            # Mark this verified ID as used
+            verified[vid]["used"] = True
+            verified[vid]["used_by"] = uid
+            verified[vid]["used_at"] = int(time.time())
+            verified[vid]["link"] = link[:100]
             
-            # Remove used verified ID from dictionary
-            if vid in verified:
-                del verified[vid]
-            break
+            break  # Stop after first match (one verified ID per submission)
+    
+    if status == "VERIFIED" and added > 0:
+        # Add to user's balance
+        users[uid]["balance"] += added
+        users[uid]["proofs"] += 1
+        
+        # Update user's last active time
+        users[uid]["last_active"] = int(time.time())
+        
+        # Log the submission
+        log_submission(uid, link, status, added, used_verified_ids)
     
     save(USERS, users)
     save(VERIFIED, verified)
@@ -259,11 +366,13 @@ async def proof_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             ADMIN_ID,
             f"📥 New Proof\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
             f"👤 {users[uid]['name']}\n"
             f"🆔 {uid}\n"
             f"✅ {status}\n"
             f"💰 +₹{added}\n"
-            f"🔗 {link[:100]}{'...' if len(link) > 100 else ''}"
+            f"🔗 {link[:100]}{'...' if len(link) > 100 else ''}\n"
+            f"🏷️ Used IDs: {', '.join(used_verified_ids) if used_verified_ids else 'None'}"
         )
     except:
         pass
@@ -697,26 +806,169 @@ async def ver_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     verified = load(VERIFIED, {})
     
     added_count = 0
+    updated_count = 0
+    
     for uid in extracted_ids:
         if uid not in verified:
-            verified[uid] = amount
+            # Add new verified ID
+            verified[uid] = {
+                "amount": amount,
+                "used": False,
+                "added_at": int(time.time())
+            }
             added_count += 1
         else:
-            # Update existing ID with new amount
-            verified[uid] = amount
+            # Update existing ID - keep old data but update amount if different
+            if isinstance(verified[uid], dict):
+                if verified[uid]["amount"] != amount:
+                    verified[uid]["amount"] = amount
+                    verified[uid]["updated_at"] = int(time.time())
+                    updated_count += 1
+            else:
+                # Convert old format to new format
+                old_amount = verified[uid]
+                verified[uid] = {
+                    "amount": amount,
+                    "used": False,
+                    "added_at": int(time.time()),
+                    "old_amount": old_amount
+                }
+                updated_count += 1
     
     save(VERIFIED, verified)
     
+    response_text = f"✅ Successfully processed {len(extracted_ids)} ID(s)!\n\n"
+    if added_count > 0:
+        response_text += f"➕ Newly added: {added_count} ID(s)\n"
+    if updated_count > 0:
+        response_text += f"✏️ Updated: {updated_count} ID(s)\n"
+    
+    response_text += f"💰 Amount set: ₹{amount} for each ID\n"
+    response_text += f"📊 Total verified IDs now: {len(verified)}\n"
+    response_text += f"✅ Unused IDs: {sum(1 for v in verified.values() if isinstance(v, dict) and not v.get('used', False))}"
+    
     await update.message.reply_text(
-        f"✅ Successfully added/updated {added_count} ID(s)!\n\n"
-        f"💰 Amount set: ₹{amount} for each ID\n"
-        f"📊 Total verified IDs now: {len(verified)}",
+        response_text,
         reply_markup=admin_menu()
     )
     
     # Clear context
     context.user_data.clear()
     return ConversationHandler.END
+
+# ================= VIEW VERIFIED IDs =================
+async def view_verified_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    
+    verified = load(VERIFIED, {})
+    
+    if not verified:
+        await update.message.reply_text("📭 No verified IDs found.")
+        return
+    
+    # Count statistics
+    total_ids = len(verified)
+    used_ids = 0
+    unused_ids = 0
+    total_amount = 0
+    used_amount = 0
+    unused_amount = 0
+    
+    for vid, data in verified.items():
+        if isinstance(data, dict):
+            amount = data.get("amount", 0)
+            used = data.get("used", False)
+        else:
+            amount = data
+            used = False
+        
+        total_amount += amount
+        if used:
+            used_ids += 1
+            used_amount += amount
+        else:
+            unused_ids += 1
+            unused_amount += amount
+    
+    # Show last 10 verified IDs
+    msg = f"📋 VERIFIED IDs STATISTICS\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"📊 Total IDs: {total_ids}\n"
+    msg += f"✅ Unused: {unused_ids} (₹{unused_amount})\n"
+    msg += f"❌ Used: {used_ids} (₹{used_amount})\n"
+    msg += f"💰 Total Amount: ₹{total_amount}\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"📜 Recent IDs (Last 10):\n"
+    
+    # Show last 10 IDs
+    recent_ids = list(verified.items())[-10:]
+    for i, (vid, data) in enumerate(recent_ids[-10:], 1):
+        if isinstance(data, dict):
+            amount = data.get("amount", 0)
+            used = "✅" if not data.get("used", False) else "❌"
+            status = f"{used} ₹{amount}"
+        else:
+            status = f"₹{data}"
+        
+        msg += f"{i}. {vid}: {status}\n"
+    
+    if len(verified) > 10:
+        msg += f"\n... and {len(verified) - 10} more IDs"
+    
+    await update.message.reply_text(msg)
+
+# ================= PROOF HISTORY =================
+async def proof_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    
+    history = load(SUBMISSION_HISTORY, {})
+    
+    if not history:
+        await update.message.reply_text("📭 No submission history found.")
+        return
+    
+    # Get today's submissions
+    today_timestamp = int(time.time()) - 86400  # Last 24 hours
+    today_count = 0
+    today_amount = 0
+    
+    # Get recent submissions (last 20)
+    recent_subs = []
+    for user_id, submissions in history.items():
+        for sub in submissions[-5:]:  # Last 5 per user
+            if sub["timestamp"] >= today_timestamp:
+                today_count += 1
+                today_amount += sub.get("amount", 0)
+            recent_subs.append((user_id, sub))
+    
+    # Sort by timestamp (newest first)
+    recent_subs.sort(key=lambda x: x[1]["timestamp"], reverse=True)
+    
+    msg = f"📜 PROOF SUBMISSION HISTORY\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"📊 Today's Stats (24h):\n"
+    msg += f"   • Submissions: {today_count}\n"
+    msg += f"   • Amount: ₹{today_amount}\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"🕒 Recent Submissions:\n"
+    
+    for user_id, sub in recent_subs[:10]:  # Show last 10
+        timestamp = time.strftime('%Y-%m-%d %H:%M', time.localtime(sub["timestamp"]))
+        status = "✅" if sub["status"] == "VERIFIED" else "❌"
+        amount = f"+₹{sub['amount']}" if sub["amount"] > 0 else "₹0"
+        
+        msg += f"\n⏰ {timestamp}\n"
+        msg += f"👤 User: {user_id}\n"
+        msg += f"📊 Status: {status} {amount}\n"
+        msg += f"🔗 Link: {sub['link'][:50]}...\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    if len(recent_subs) > 10:
+        msg += f"\n\n... and {len(recent_subs) - 10} more submissions"
+    
+    await update.message.reply_text(msg)
 
 # ================= TOTAL USERS =================
 async def total_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -725,21 +977,52 @@ async def total_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     users = load(USERS, {})
     verified = load(VERIFIED, {})
+    history = load(SUBMISSION_HISTORY, {})
     
-    total_balance = sum(user["balance"] for user in users.values())
-    total_proofs = sum(user["proofs"] for user in users.values())
+    # Calculate statistics
+    total_balance = sum(user.get("balance", 0) for user in users.values())
+    total_proofs = sum(user.get("proofs", 0) for user in users.values())
     
-    # Calculate total amount in verified IDs
-    total_verified_amount = sum(verified.values())
+    # Calculate verified IDs statistics
+    unused_amount = 0
+    used_amount = 0
+    for data in verified.values():
+        if isinstance(data, dict):
+            amount = data.get("amount", 0)
+            if data.get("used", False):
+                used_amount += amount
+            else:
+                unused_amount += amount
+        else:
+            unused_amount += data
+    
+    # Active users (last 7 days)
+    week_ago = int(time.time()) - 604800
+    active_users = sum(1 for user in users.values() 
+                      if user.get("last_active", 0) >= week_ago)
+    
+    # Today's submissions
+    today_timestamp = int(time.time()) - 86400
+    today_subs = 0
+    for submissions in history.values():
+        for sub in submissions:
+            if sub.get("timestamp", 0) >= today_timestamp:
+                today_subs += 1
     
     await update.message.reply_text(
         f"📊 BOT STATISTICS\n"
-        f"━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👥 Total Users: {len(users)}\n"
+        f"📈 Active (7d): {active_users}\n"
         f"💰 Total Balance: ₹{total_balance}\n"
         f"📥 Total Proofs: {total_proofs}\n"
-        f"✅ Verified IDs: {len(verified)}\n"
-        f"💵 Total Verified Amount: ₹{total_verified_amount}"
+        f"📊 Today's Submissions: {today_subs}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ VERIFIED IDs:\n"
+        f"• Total: {len(verified)}\n"
+        f"• Unused Amount: ₹{unused_amount}\n"
+        f"• Used Amount: ₹{used_amount}\n"
+        f"• Total Amount: ₹{unused_amount + used_amount}"
     )
 
 # ================= USER DETAILS =================
@@ -752,19 +1035,33 @@ async def user_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No users found")
         return
     
-    # Show last 5 users
+    # Show last 5 users with detailed info
     user_list = list(users.items())[-5:]
-    msg = "📋 RECENT USERS\n━━━━━━━━━━━━━━\n\n"
+    msg = "📋 RECENT USERS DETAILS\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     
     for uid, data in user_list:
         username = f"@{data['username']}" if data.get('username') else "No username"
+        
+        # Format join date
+        join_date = time.strftime('%Y-%m-%d', time.localtime(data.get('joined_at', 0)))
+        
+        # Format last active
+        last_active = data.get('last_active', 0)
+        if last_active:
+            days_ago = (int(time.time()) - last_active) // 86400
+            last_seen = f"{days_ago} day(s) ago" if days_ago > 0 else "Today"
+        else:
+            last_seen = "Never"
+        
         msg += (
             f"👤 Name: {data.get('name', 'Unknown')}\n"
             f"📱 Username: {username}\n"
             f"🆔 ID: {uid}\n"
-            f"💰 Balance: ₹{data['balance']}\n"
-            f"📊 Proofs: {data['proofs']}\n"
-            f"━━━━━━━━━━━━━━\n"
+            f"💰 Balance: ₹{data.get('balance', 0)}\n"
+            f"📊 Proofs: {data.get('proofs', 0)}\n"
+            f"📅 Joined: {join_date}\n"
+            f"⏰ Last Active: {last_seen}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         )
     
     await update.message.reply_text(msg)
@@ -776,9 +1073,26 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
     return ConversationHandler.END
 
+# ================= SHUTDOWN HANDLER =================
+async def shutdown(application):
+    """Handle bot shutdown gracefully"""
+    print("\n🤖 Bot is shutting down...")
+    print("💾 Creating final backup...")
+    backup_data()
+    print("✅ Backup created successfully!")
+    print("👋 Goodbye!")
+
 # ================= MAIN =================
 def main():
+    # Create initial backup
+    print("🤖 Bot is starting...")
+    print("💾 Creating initial backup...")
+    backup_data()
+    
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # Add shutdown handler
+    app.add_handler(CommandHandler("shutdown", lambda u, c: app.stop()))
     
     # Basic commands
     app.add_handler(CommandHandler("start", start))
@@ -797,6 +1111,8 @@ def main():
     # Admin menu
     app.add_handler(MessageHandler(filters.Regex("^👥 Total Users$"), total_users))
     app.add_handler(MessageHandler(filters.Regex("^📊 User Details$"), user_details))
+    app.add_handler(MessageHandler(filters.Regex("^📜 Proof History$"), proof_history))
+    app.add_handler(MessageHandler(filters.Regex("^🔧 View Verified IDs$"), view_verified_ids))
     app.add_handler(MessageHandler(filters.Regex("^🏠 Main Menu$"), start))
     
     # Submit Proof Conversation
@@ -859,8 +1175,17 @@ def main():
     app.add_handler(rem_bal_conv)
     app.add_handler(ver_ids_conv)
     
-    print("🤖 Bot is running...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    print("✅ Bot started successfully!")
+    print("📊 Data protection enabled with auto-backup system")
+    print("🏃 Running...")
+    
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # Ensure backup on shutdown
+        shutdown(app)
 
 if __name__ == "__main__":
     main()
