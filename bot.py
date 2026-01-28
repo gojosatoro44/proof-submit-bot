@@ -1,8 +1,8 @@
-
 import os, json
 import threading
 import re
 import time
+import warnings
 from telegram import (
     Update, ReplyKeyboardMarkup,
     InlineKeyboardMarkup, InlineKeyboardButton
@@ -1245,6 +1245,9 @@ def main():
         print(f"⚠️ Warning: Initial backup failed: {e}")
     
     try:
+        # Suppress the warning
+        warnings.filterwarnings("ignore", category=UserWarning)
+        
         app = ApplicationBuilder().token(BOT_TOKEN).build()
         print("✅ Application built successfully!")
     except Exception as e:
@@ -1258,72 +1261,68 @@ def main():
     
     # Callback queries
     app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
-    app.add_handler(CallbackQueryHandler(cancel_proof_callback, pattern="^cancel_proof$"))
     app.add_handler(CallbackQueryHandler(wd_action, pattern="^(done|rej):"))
-    app.add_handler(CallbackQueryHandler(wd_method, pattern="^(upi|vsv|fxl|cancel)$"))
     
-    # User menu
-    app.add_handler(MessageHandler(filters.Regex("^💰 Balance$"), balance))
-    app.add_handler(MessageHandler(filters.Regex("^🆘 Support$"), support))
-    
-    # Admin menu
-    app.add_handler(MessageHandler(filters.Regex("^👥 Total Users$"), total_users))
-    app.add_handler(MessageHandler(filters.Regex("^📊 User Details$"), user_details))
-    app.add_handler(MessageHandler(filters.Regex("^📜 Proof History$"), proof_history))
-    app.add_handler(MessageHandler(filters.Regex("^🔧 View Verified IDs$"), view_verified_ids))
-    app.add_handler(MessageHandler(filters.Regex("^🏠 Main Menu$"), start))
+    # User menu handlers
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^💰 Balance$'), balance))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^🆘 Support$'), support))
     
     # Submit Proof Conversation
     proof_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📤 Submit Proof$"), submit_proof)],
+        entry_points=[MessageHandler(filters.TEXT & filters.Regex(r'^📤 Submit Proof$'), submit_proof)],
         states={
             PROOF_LINK: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, proof_link),
                 CallbackQueryHandler(cancel_proof_callback, pattern="^cancel_proof$")
             ]
         },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)]
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        per_message=False
     )
     
     # Withdraw Conversation
     withdraw_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^💸 Withdraw$"), withdraw)],
+        entry_points=[MessageHandler(filters.TEXT & filters.Regex(r'^💸 Withdraw$'), withdraw)],
         states={
-            WD_METHOD: [CallbackQueryHandler(wd_method)],
+            WD_METHOD: [CallbackQueryHandler(wd_method, pattern="^(upi|vsv|fxl|cancel)$")],
             WD_DETAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, wd_detail)],
             WD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, wd_amount)]
         },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)]
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        per_message=False
     )
     
     # Add Balance Conversation
     add_bal_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^➕ Add Balance$"), add_balance)],
+        entry_points=[MessageHandler(filters.TEXT & filters.Regex(r'^➕ Add Balance$'), add_balance)],
         states={
             ADD_BAL_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_bal_user)],
             ADD_BAL_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_bal_amount)]
         },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)]
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        per_message=False
     )
     
     # Remove Balance Conversation
     rem_bal_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^➖ Remove Balance$"), remove_balance)],
+        entry_points=[MessageHandler(filters.TEXT & filters.Regex(r'^➖ Remove Balance$'), remove_balance)],
         states={
             REM_BAL_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, rem_bal_user)],
             REM_BAL_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, rem_bal_amount)]
         },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)]
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        per_message=False
     )
     
     # Add Verified IDs Conversation
     ver_ids_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📋 Add Verified IDs$"), add_verified_ids)],
+        entry_points=[MessageHandler(filters.TEXT & filters.Regex(r'^📋 Add Verified IDs$'), add_verified_ids)],
         states={
             ADD_VER_IDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_ver_ids)],
             VER_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ver_amount)]
         },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)]
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        per_message=False
     )
     
     # Add all conversation handlers
@@ -1332,6 +1331,18 @@ def main():
     app.add_handler(add_bal_conv)
     app.add_handler(rem_bal_conv)
     app.add_handler(ver_ids_conv)
+    
+    # Admin menu handlers
+    admin_handlers = [
+        ("👥 Total Users", total_users),
+        ("📊 User Details", user_details),
+        ("📜 Proof History", proof_history),
+        ("🔧 View Verified IDs", view_verified_ids),
+        ("🏠 Main Menu", start)
+    ]
+    
+    for text, handler in admin_handlers:
+        app.add_handler(MessageHandler(filters.TEXT & filters.Regex(f'^{text}$'), handler))
     
     print("✅ All handlers registered successfully!")
     print("=" * 50)
@@ -1344,11 +1355,17 @@ def main():
     print("=" * 50)
     
     try:
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            close_loop=False
+        )
     except KeyboardInterrupt:
         print("\n🛑 Bot stopped by user")
     except Exception as e:
         print(f"❌ Bot crashed with error: {e}")
+        import traceback
+        traceback.print_exc()
         print("🔄 Restarting in 5 seconds...")
         time.sleep(5)
         main()
